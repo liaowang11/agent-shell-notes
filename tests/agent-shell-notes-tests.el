@@ -34,7 +34,8 @@
   "Run BODY with an empty note list and no package buffers left behind."
   (declare (indent 0) (debug t))
   `(let ((agent-shell-notes--notes nil)
-         (agent-shell-notes--next-id 0))
+         (agent-shell-notes--next-id 0)
+         (agent-shell-notes--marks nil))
      (unwind-protect
          (save-window-excursion
            (delete-other-windows)
@@ -466,6 +467,449 @@ Runs where PROP is nil are skipped."
         (agent-shell-notes-tests--key "q")
         (should-not (eq (get-buffer "*agent-shell-notes*")
                         (window-buffer (selected-window))))))))
+
+;;;; Marks
+
+(defun agent-shell-notes-tests--marked ()
+  "Return the ids of the review notes shown marked, in buffer order.
+A note is shown marked when a mark overlay covers or starts at it."
+  (let (ids)
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when-let* ((id (overlay-get ov 'agent-shell-notes-mark)))
+        (should (eq id (get-text-property (overlay-start ov)
+                                          'agent-shell-notes-id)))
+        (push (cons (overlay-start ov) id) ids)))
+    (delete-dups (mapcar #'cdr (sort ids (lambda (a b) (< (car a) (car b))))))))
+
+(defun agent-shell-notes-tests--goto-note (id)
+  (goto-char (text-property-any (point-min) (point-max)
+                                'agent-shell-notes-id id)))
+
+(defun agent-shell-notes-tests--review-with (n)
+  "Capture N one-line notes from one file and open the review on it.
+Note I is on line I, so the review order is 1 .. N."
+  (let ((buf (agent-shell-notes-tests--file
+              (agent-shell-notes-tests--lines (max n 3)))))
+    (dotimes (i n)
+      (agent-shell-notes-tests--capture buf (1+ i) nil (format "n%d" (1+ i))))
+    (agent-shell-notes-review)
+    (set-buffer "*agent-shell-notes*")
+    buf))
+
+(ert-deftest agent-shell-notes-review-m-marks-and-moves-to-next ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 3)
+    (agent-shell-notes-tests--goto-note 1)
+    (forward-line 1)
+    (agent-shell-notes-tests--key "m")
+    (should (equal '(1) (agent-shell-notes-tests--marked)))
+    (should (agent-shell-notes-tests--at-note-start-p 2))
+    (agent-shell-notes-tests--key "m")
+    (should (equal '(1 2) (agent-shell-notes-tests--marked)))
+    (should (agent-shell-notes-tests--at-note-start-p 3))
+    ;; On the last note: mark and stay.
+    (agent-shell-notes-tests--key "m")
+    (should (equal '(1 2 3) (agent-shell-notes-tests--marked)))
+    (should (eq 3 (get-text-property (point) 'agent-shell-notes-id)))))
+
+(ert-deftest agent-shell-notes-review-u-unmarks-and-moves-to-next ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 3)
+    (agent-shell-notes-tests--goto-note 1)
+    (dotimes (_ 3) (agent-shell-notes-tests--key "m"))
+    (agent-shell-notes-tests--goto-note 2)
+    (agent-shell-notes-tests--key "u")
+    (should (equal '(1 3) (agent-shell-notes-tests--marked)))
+    (should (agent-shell-notes-tests--at-note-start-p 3))
+    ;; Unmarking an unmarked note is harmless.
+    (agent-shell-notes-tests--goto-note 2)
+    (agent-shell-notes-tests--key "u")
+    (should (equal '(1 3) (agent-shell-notes-tests--marked)))))
+
+(ert-deftest agent-shell-notes-review-m-and-u-act-on-region ()
+  (agent-shell-notes-tests--with-clean-state
+    (transient-mark-mode 1)
+    (agent-shell-notes-tests--review-with 4)
+    ;; From inside note 1 to the start of note 3: touches 1 and 2 only.
+    (agent-shell-notes-tests--goto-note 1)
+    (forward-line 1)
+    (push-mark (point) t t)
+    (agent-shell-notes-tests--goto-note 3)
+    (agent-shell-notes-tests--key "m")
+    (should (equal '(1 2) (agent-shell-notes-tests--marked)))
+    (should-not (region-active-p))
+    (should (agent-shell-notes-tests--at-note-start-p 3))
+    ;; A region from the middle of note 2 into note 4 unmarks 2, leaves 1.
+    (agent-shell-notes-tests--goto-note 2)
+    (forward-line 1)
+    (push-mark (point) t t)
+    (agent-shell-notes-tests--goto-note 4)
+    (forward-char 1)
+    (agent-shell-notes-tests--key "u")
+    (should (equal '(1) (agent-shell-notes-tests--marked)))
+    (should (eq 4 (get-text-property (point) 'agent-shell-notes-id)))))
+
+(ert-deftest agent-shell-notes-review-t-toggles-and-U-unmarks-all ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 3)
+    ;; From none, t marks all.
+    (agent-shell-notes-tests--key "t")
+    (should (equal '(1 2 3) (agent-shell-notes-tests--marked)))
+    (agent-shell-notes-tests--key "t")
+    (should (equal '() (agent-shell-notes-tests--marked)))
+    ;; From some, t inverts each mark.
+    (agent-shell-notes-tests--goto-note 2)
+    (agent-shell-notes-tests--key "m")
+    (agent-shell-notes-tests--key "t")
+    (should (equal '(1 3) (agent-shell-notes-tests--marked)))
+    (agent-shell-notes-tests--key "U")
+    (should (equal '() (agent-shell-notes-tests--marked)))
+    ;; U with nothing marked is harmless.
+    (agent-shell-notes-tests--key "U")
+    (should (equal '() (agent-shell-notes-tests--marked)))))
+
+(ert-deftest agent-shell-notes-review-t-skips-archived-notes ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 3)
+    (setf (alist-get :archived (nth 1 agent-shell-notes--notes))
+          "Claude Agent @ x")
+    (agent-shell-notes-tests--key "g")
+    (agent-shell-notes-tests--key "t")
+    (should (equal '(1 3) (agent-shell-notes-tests--marked)))
+    ;; An archived note can still be marked by hand; t leaves it marked.
+    (agent-shell-notes-tests--goto-note 2)
+    (agent-shell-notes-tests--key "m")
+    (agent-shell-notes-tests--key "t")
+    (should (equal '(2) (agent-shell-notes-tests--marked)))
+    (agent-shell-notes-tests--key "U")
+    (should (equal '() (agent-shell-notes-tests--marked)))))
+
+(ert-deftest agent-shell-notes-review-marks-survive-redraw-and-capture ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--review-with 3)))
+      (agent-shell-notes-tests--goto-note 2)
+      (agent-shell-notes-tests--key "m")
+      (agent-shell-notes-tests--key "g")
+      (should (equal '(2) (agent-shell-notes-tests--marked)))
+      ;; A capture while the review is shown redraws it in place.
+      (let ((review-window (selected-window)))
+        (select-window (split-window review-window nil 'above))
+        (agent-shell-notes-tests--capture buf 3 nil "again")  ; id 4
+        (with-current-buffer "*agent-shell-notes*"
+          (should (equal '(1 2 3 4) (agent-shell-notes-tests--runs
+                                     'agent-shell-notes-id)))
+          (should (equal '(2) (agent-shell-notes-tests--marked))))))))
+
+(ert-deftest agent-shell-notes-review-mark-off-a-note-signals ()
+  (agent-shell-notes-tests--with-clean-state
+    (transient-mark-mode 1)
+    (agent-shell-notes-tests--review-with 2)
+    ;; Point on the group heading: no note.
+    (goto-char (point-min))
+    (dolist (key '("m" "u"))
+      (should (equal "No note at point"
+                     (cadr (should-error (agent-shell-notes-tests--key key)
+                                         :type 'user-error)))))
+    ;; A region over the heading alone touches no note.
+    (push-mark (point) t t)
+    (end-of-line)
+    (should-error (agent-shell-notes-tests--key "m") :type 'user-error)
+    (should (equal '() (agent-shell-notes-tests--marked)))))
+
+(ert-deftest agent-shell-notes-review-mark-indicator-background ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((agent-shell-notes-mark-indicator 'background))
+      (agent-shell-notes-tests--review-with 2)
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "m")
+      (let ((ov (seq-find (lambda (ov) (overlay-get ov 'agent-shell-notes-mark))
+                          (overlays-in (point-min) (point-max)))))
+        (should (eq 'agent-shell-notes-mark (overlay-get ov 'face)))
+        ;; The face covers the whole note.
+        (agent-shell-notes-tests--goto-note 1)
+        (should (= (point) (overlay-start ov)))
+        (should (= (next-single-property-change (point) 'agent-shell-notes-id)
+                   (overlay-end ov))))
+      ;; Marks are overlays, never text.
+      (should (equal '("n1" "n2")
+                     (list (agent-shell-notes-tests--field-text 1 'text)
+                           (agent-shell-notes-tests--field-text 2 'text))))
+      (should-not (string-match-p "\\*\\*lines\\|^\\*$"
+                                  (buffer-substring-no-properties
+                                   (point-min) (point-max)))))))
+
+(ert-deftest agent-shell-notes-review-mark-indicator-fringe-on-tty ()
+  ;; Batch has no graphic display, so `fringe' takes its tty branch.
+  (agent-shell-notes-tests--with-clean-state
+    (let ((agent-shell-notes-mark-indicator 'fringe)
+          (text-before nil))
+      (agent-shell-notes-tests--review-with 2)
+      (setq text-before (buffer-string))
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "m")
+      (should (equal text-before (buffer-string)))
+      (let* ((ov (seq-find (lambda (ov) (overlay-get ov 'agent-shell-notes-mark))
+                           (overlays-in (point-min) (point-max))))
+             (display (get-text-property 0 'display
+                                         (overlay-get ov 'before-string))))
+        (should (equal '(margin left-margin) (car display)))
+        (should (equal "*" (substring-no-properties (cadr display))))
+        (should-not (overlay-get ov 'face)))
+      (should (= 1 left-margin-width))
+      (should (= 1 (car (window-margins
+                         (get-buffer-window "*agent-shell-notes*"))))))))
+
+;;;; Edit mode and deletion
+
+(defun agent-shell-notes-tests--writable-p (pos)
+  "Non-nil when inserting a character at POS succeeds; the buffer is restored."
+  (condition-case nil
+      (save-excursion
+        (goto-char pos)
+        (insert-and-inherit "x")
+        (delete-char -1)
+        t)
+    (text-read-only nil)))
+
+(defun agent-shell-notes-tests--note-pos (id)
+  "Return the start of review note ID."
+  (text-property-any (point-min) (point-max) 'agent-shell-notes-id id))
+
+(ert-deftest agent-shell-notes-edit-mode-lifts-read-only-from-texts-only ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")  ; id 1
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-x C-q")
+        (should agent-shell-notes-edit-mode)
+        ;; Batch `format-mode-line' returns "", so check the lighter entry.
+        (should (equal " Edit" (cadr (assq 'agent-shell-notes-edit-mode
+                                           minor-mode-alist))))
+        (let ((text (agent-shell-notes-tests--search "^hoist it$")))
+          (should (agent-shell-notes-tests--writable-p text))
+          (should (agent-shell-notes-tests--writable-p (+ text 3)))
+          (should (agent-shell-notes-tests--writable-p (+ text 8))))
+        ;; Heading, location and quote stay read-only.
+        (should-not (agent-shell-notes-tests--writable-p (point-min)))
+        (should-not (agent-shell-notes-tests--writable-p
+                     (1+ (agent-shell-notes-tests--search "^\\*\\*line"))))
+        (should-not (agent-shell-notes-tests--writable-p
+                     (1+ (agent-shell-notes-tests--search "^line 2$"))))))))
+
+(defun agent-shell-notes-tests--type (string)
+  "Type STRING at point as if from the keyboard, one character at a time."
+  (dolist (char (string-to-list string))
+    (let ((last-command-event char))
+      (call-interactively (key-binding (vector char))))))
+
+(defun agent-shell-notes-tests--edit-key (key)
+  "Run the command KEY runs in the current buffer."
+  (let ((command (key-binding (kbd key))))
+    (should (commandp command))
+    (call-interactively command)))
+
+(defun agent-shell-notes-tests--note-text (id)
+  (alist-get :text (seq-find (lambda (note) (eql id (alist-get :id note)))
+                             agent-shell-notes--notes)))
+
+(ert-deftest agent-shell-notes-edit-mode-commit-saves-changed-texts ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")  ; id 1
+      (agent-shell-notes-tests--capture buf 4 nil "rename")    ; id 2
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-x C-q")
+        ;; Typed at the start and the end of a text, not via `insert'.
+        (goto-char (agent-shell-notes-tests--search "^hoist it$"))
+        (agent-shell-notes-tests--type "please ")
+        (end-of-line)
+        (agent-shell-notes-tests--type " now")
+        (agent-shell-notes-tests--edit-key "C-c C-c")
+        (should-not agent-shell-notes-edit-mode)
+        (should (equal "please hoist it now"
+                       (agent-shell-notes-tests--note-text 1)))
+        (should (equal "rename" (agent-shell-notes-tests--note-text 2)))
+        (should (equal "please hoist it now"
+                       (agent-shell-notes-tests--field-text 1 'text)))
+        ;; Back to the note keys and an all read-only buffer.
+        (should (eq 'agent-shell-notes-next-note (key-binding (kbd "n"))))
+        (should-not (text-property-not-all (point-min) (point-max)
+                                           'read-only t))
+        (should-not (buffer-modified-p))))))
+
+(ert-deftest agent-shell-notes-edit-mode-revert-drops-changes ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-c C-e")
+        (goto-char (agent-shell-notes-tests--search "^hoist it$"))
+        (agent-shell-notes-tests--type "never ")
+        (agent-shell-notes-tests--edit-key "C-c C-k")
+        (should-not agent-shell-notes-edit-mode)
+        (should (equal "hoist it" (agent-shell-notes-tests--note-text 1)))
+        (should (equal "hoist it"
+                       (agent-shell-notes-tests--field-text 1 'text)))
+        (should-not (text-property-not-all (point-min) (point-max)
+                                           'read-only t))))))
+
+(ert-deftest agent-shell-notes-edit-mode-emptied-text-keeps-quote-only-note ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-x C-q")
+        (let ((beg (agent-shell-notes-tests--search "^hoist it$")))
+          (delete-region beg (+ beg (length "hoist it"))))
+        (agent-shell-notes-tests--edit-key "C-c C-c")
+        (should (= 1 (length agent-shell-notes--notes)))
+        (should (equal "" (agent-shell-notes-tests--note-text 1)))
+        (should (equal '(location quote)
+                       (agent-shell-notes-tests--note-fields 1)))))))
+
+(ert-deftest agent-shell-notes-edit-puts-point-in-the-note-text ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")  ; id 1
+      (agent-shell-notes-tests--capture buf 4)                 ; id 2, quote only
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should-error (progn (goto-char (point-min))
+                             (agent-shell-notes-tests--key "e"))
+                      :type 'user-error)
+        (should-not agent-shell-notes-edit-mode)
+        (goto-char (agent-shell-notes-tests--note-pos 2))
+        (agent-shell-notes-tests--key "e")
+        (should agent-shell-notes-edit-mode)
+        (should (eq 2 (get-text-property (point) 'agent-shell-notes-id)))
+        (agent-shell-notes-tests--type "new remark")
+        (agent-shell-notes-tests--edit-key "C-c C-c")
+        (should (equal "new remark" (agent-shell-notes-tests--note-text 2)))
+        (should (equal "hoist it" (agent-shell-notes-tests--note-text 1)))
+        (should (equal '(location quote text)
+                       (agent-shell-notes-tests--note-fields 2)))))))
+
+(ert-deftest agent-shell-notes-edit-mode-note-keys-inactive ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "ab")  ; id 1
+      (agent-shell-notes-tests--capture buf 4 nil "cd")  ; id 2
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-x C-q")
+        (dolist (key '("n" "p" "g" "q" "k" "e" "m" "u" "t" "U" "D"))
+          (should-not (lookup-key (current-local-map) (kbd key))))
+        ;; No map reaches the mark commands (DESIGN §5.3).
+        (goto-char (point-min))
+        (dolist (key '("m" "u" "t" "U"))
+          (should-not (memq (key-binding (kbd key))
+                            '(agent-shell-notes-mark
+                              agent-shell-notes-unmark
+                              agent-shell-notes-toggle-marks
+                              agent-shell-notes-unmark-all))))
+        ;; The keys that entered edit mode leave it, saving, as in wdired.
+        (dolist (key '("C-x C-q" "C-c C-e"))
+          (should (eq 'agent-shell-notes-edit-commit
+                      (key-binding (kbd key)))))
+        ;; In a note text, note keys type themselves.
+        (goto-char (agent-shell-notes-tests--search "^ab$"))
+        (agent-shell-notes-tests--type "nkq")
+        (should (equal "nkqab" (buffer-substring-no-properties
+                                (line-beginning-position) (line-end-position))))
+        (should (= 2 (length agent-shell-notes--notes)))
+        (should agent-shell-notes-edit-mode)))))
+
+(ert-deftest agent-shell-notes-edit-mode-survives-a-capture ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "ab")  ; id 1
+      (agent-shell-notes-review)
+      (let ((review (current-buffer)))
+        (agent-shell-notes-tests--key "C-x C-q")
+        (goto-char (agent-shell-notes-tests--search "^ab$"))
+        (agent-shell-notes-tests--type "x")
+        (agent-shell-notes-tests--capture buf 4 nil "cd")  ; id 2
+        (with-current-buffer review
+          (should agent-shell-notes-edit-mode)
+          (should (agent-shell-notes-tests--search "^xab$"))
+          (agent-shell-notes-tests--edit-key "C-c C-c")
+          (should (equal "xab" (agent-shell-notes-tests--note-text 1)))
+          ;; Leaving edit mode draws the note captured meanwhile.
+          (should (equal '(1 2) (agent-shell-notes-tests--runs
+                                 'agent-shell-notes-id))))))))
+
+(ert-deftest agent-shell-notes-delete-note-at-point-without-asking ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 1 nil "one")    ; id 1
+      (agent-shell-notes-tests--capture buf 3 nil "three")  ; id 2
+      (agent-shell-notes-tests--capture buf 5 nil "five")   ; id 3
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should-error (progn (goto-char (point-min))
+                             (agent-shell-notes-tests--key "k"))
+                      :type 'user-error)
+        (should (= 3 (length agent-shell-notes--notes)))
+        (goto-char (1+ (agent-shell-notes-tests--note-pos 2)))
+        (agent-shell-notes-tests--key "m")
+        (goto-char (1+ (agent-shell-notes-tests--note-pos 2)))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (error "Asked")))
+                  ((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) (error "Asked"))))
+          (agent-shell-notes-tests--key "k"))
+        (should (equal '(1 3) (mapcar (lambda (note) (alist-get :id note))
+                                      agent-shell-notes--notes)))
+        (should (equal '(1 3) (agent-shell-notes-tests--runs
+                               'agent-shell-notes-id)))
+        ;; A deleted note leaves no stale mark.
+        (should-not agent-shell-notes--marks)))))
+
+(ert-deftest agent-shell-notes-delete-marked-after-confirming ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5)))
+          prompts)
+      (agent-shell-notes-tests--capture buf 1 nil "one")    ; id 1
+      (agent-shell-notes-tests--capture buf 3 nil "three")  ; id 2
+      (agent-shell-notes-tests--capture buf 5 nil "five")   ; id 3
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should (equal "No marked notes"
+                       (cadr (should-error (agent-shell-notes-tests--key "D")
+                                           :type 'user-error))))
+        (goto-char (1+ (agent-shell-notes-tests--note-pos 1)))
+        (agent-shell-notes-tests--key "m")
+        (goto-char (1+ (agent-shell-notes-tests--note-pos 3)))
+        (agent-shell-notes-tests--key "m")
+        ;; Declined: nothing changes.
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (prompt) (push prompt prompts) nil)))
+          (agent-shell-notes-tests--key "D"))
+        (should (equal '("Delete 2 marked notes? ") prompts))
+        (should (= 3 (length agent-shell-notes--notes)))
+        (should (equal '(1 3) (sort (copy-sequence agent-shell-notes--marks)
+                                    #'<)))
+        ;; Confirmed: only the marked notes go, with their marks.
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+          (agent-shell-notes-tests--key "D"))
+        (should (equal '(2) (mapcar (lambda (note) (alist-get :id note))
+                                    agent-shell-notes--notes)))
+        (should (equal '(2) (agent-shell-notes-tests--runs
+                             'agent-shell-notes-id)))
+        (should-not agent-shell-notes--marks)))))
 
 (provide 'agent-shell-notes-tests)
 ;;; agent-shell-notes-tests.el ends here

@@ -327,12 +327,37 @@ An empty note saves the quote alone."
   "Display action for the review, as for `pop-to-buffer'."
   :type 'sexp)
 
+(defcustom agent-shell-notes-mark-indicator 'fringe
+  "How the review shows a marked note.
+`fringe' puts a bitmap in the left fringe (a `*' in the left margin
+on a text terminal); `background' gives the whole note the face
+`agent-shell-notes-mark'."
+  :type '(choice (const :tag "Fringe (margin on a tty)" fringe)
+                 (const :tag "Background" background)))
+
+(defface agent-shell-notes-mark
+  '((t :inherit region))
+  "Face of a marked note's indicator or background.")
+
+(defvar agent-shell-notes--marks nil
+  "Ids of the marked notes.
+Kept apart from the review buffer, which is redrawn from scratch.")
+
 (defvar-keymap agent-shell-notes-review-mode-map
   :doc "Keymap for `agent-shell-notes-review-mode'."
   "n" #'agent-shell-notes-next-note
   "p" #'agent-shell-notes-previous-note
+  "m" #'agent-shell-notes-mark
+  "u" #'agent-shell-notes-unmark
+  "t" #'agent-shell-notes-toggle-marks
+  "U" #'agent-shell-notes-unmark-all
   "TAB" #'agent-shell-notes-toggle-quote
   "g" #'agent-shell-notes-redraw
+  "k" #'agent-shell-notes-delete
+  "D" #'agent-shell-notes-delete-marked
+  "e" #'agent-shell-notes-edit
+  "C-c C-e" #'agent-shell-notes-edit-mode
+  "C-x C-q" #'agent-shell-notes-edit-mode
   "q" #'quit-window)
 
 (define-derived-mode agent-shell-notes-review-mode markdown-mode "Notes"
@@ -342,6 +367,78 @@ The buffer is drawn from the note list; its text is read-only.
 \\{agent-shell-notes-review-mode-map}"
   (add-to-invisibility-spec '(agent-shell-notes-quote . t))
   (setq truncate-lines nil))
+
+;;;; Edit mode
+
+(defvar-local agent-shell-notes--edit-slots nil
+  "The editable note texts of the review while in edit mode.
+Each entry is (ID BEG END): BEG and END delimit the text of note ID.
+The review draw records positions; `agent-shell-notes--edit-open-slots'
+turns them into markers.")
+
+(defvar-keymap agent-shell-notes-edit-mode-map
+  :doc "Local keymap of the review in `agent-shell-notes-edit-mode'.
+It replaces `agent-shell-notes-review-mode-map', so the note commands
+are inactive and letters insert."
+  :parent markdown-mode-map
+  "C-c C-c" #'agent-shell-notes-edit-commit
+  "C-c C-k" #'agent-shell-notes-edit-revert
+  "C-c C-e" #'agent-shell-notes-edit-commit
+  "C-x C-q" #'agent-shell-notes-edit-commit)
+
+(define-minor-mode agent-shell-notes-edit-mode
+  "Edit the note texts of the review, like `wdired-mode'.
+Only the note texts are writable; headings, locations and quotes stay
+read-only.
+\\<agent-shell-notes-edit-mode-map>\
+\\[agent-shell-notes-edit-commit] saves the changed texts, \
+\\[agent-shell-notes-edit-revert] reverts them."
+  :lighter " Edit"
+  (unless (derived-mode-p 'agent-shell-notes-review-mode)
+    (setq agent-shell-notes-edit-mode nil)
+    (user-error "Not in the notes review"))
+  (use-local-map (if agent-shell-notes-edit-mode
+                     agent-shell-notes-edit-mode-map
+                   agent-shell-notes-review-mode-map))
+  (agent-shell-notes--review-draw))
+
+(defun agent-shell-notes--edit-open-slots ()
+  "Make the recorded note texts writable and track them with markers.
+The character before each text stops passing `read-only' on, so text
+typed at the start of a note text is writable; the newline after it
+stays read-only and ends the text."
+  (setq agent-shell-notes--edit-slots
+        (mapcar
+         (pcase-lambda (`(,id ,beg ,end))
+           (remove-list-of-text-properties beg end '(read-only))
+           (put-text-property (1- beg) beg 'rear-nonsticky '(read-only))
+           (list id (copy-marker beg) (copy-marker end t)))
+         agent-shell-notes--edit-slots)))
+
+(defun agent-shell-notes-edit ()
+  "Enter edit mode with point at the end of the text of the note at point."
+  (interactive)
+  (let ((id (get-text-property (point) 'agent-shell-notes-id)))
+    (unless id
+      (user-error "No note at point"))
+    (agent-shell-notes-edit-mode 1)
+    (goto-char (nth 2 (assq id agent-shell-notes--edit-slots)))))
+
+(defun agent-shell-notes-edit-commit ()
+  "Save every note text changed in edit mode and leave edit mode.
+An emptied text keeps the note, quote only."
+  (interactive)
+  (pcase-dolist (`(,id ,beg ,end) agent-shell-notes--edit-slots)
+    (when-let* ((note (seq-find (lambda (note) (eql id (alist-get :id note)))
+                                agent-shell-notes--notes)))
+      (setf (alist-get :text note)
+            (string-trim (buffer-substring-no-properties beg end)))))
+  (agent-shell-notes-edit-mode -1))
+
+(defun agent-shell-notes-edit-revert ()
+  "Drop the changes made in edit mode and leave edit mode."
+  (interactive)
+  (agent-shell-notes-edit-mode -1))
 
 (defun agent-shell-notes--group-key (note)
   "Return the key of the review group NOTE belongs to."
@@ -402,10 +499,18 @@ group by line."
           (agent-shell-notes--fold-quote
            qbeg (point) (memq id agent-shell-notes--unfolded)))
         (insert "\n" fence "\n")))
-    (unless (string-empty-p text)
-      (agent-shell-notes--insert-field 'text text)
+    (cond
+     (agent-shell-notes-edit-mode
+      (let ((tbeg (point)))
+        (agent-shell-notes--insert-field 'text text)
+        (push (list id tbeg (point)) agent-shell-notes--edit-slots))
       (insert "\n"))
-    (put-text-property beg (point) 'agent-shell-notes-id id)))
+     ((not (string-empty-p text))
+      (agent-shell-notes--insert-field 'text text)
+      (insert "\n")))
+    (put-text-property beg (point) 'agent-shell-notes-id id)
+    (when (memq id agent-shell-notes--marks)
+      (agent-shell-notes--show-mark id beg (point)))))
 
 (defun agent-shell-notes--review-draw ()
   "Redraw the current review buffer from the note list.
@@ -415,6 +520,7 @@ Point stays on the note it was on."
         (inhibit-read-only t))
     (remove-overlays)
     (erase-buffer)
+    (setq agent-shell-notes--edit-slots nil)
     (dolist (group (agent-shell-notes--groups))
       (let ((first (car group)))
         (insert (propertize (agent-shell-notes--group-heading first)
@@ -425,6 +531,10 @@ Point stays on the note it was on."
         (agent-shell-notes--insert-note note)
         (insert "\n")))
     (add-text-properties (point-min) (point-max) '(read-only t))
+    ;; Nothing before the first character passes `read-only' on.
+    (put-text-property (point-min) (min (1+ (point-min)) (point-max))
+                       'front-sticky '(read-only))
+    (agent-shell-notes--edit-open-slots)
     (goto-char (or (and id (text-property-any (point-min) (point-max)
                                               'agent-shell-notes-id id))
                    (min pos (point-max))))
@@ -433,7 +543,8 @@ Point stays on the note it was on."
 (defun agent-shell-notes--review-refresh ()
   "Redraw the review buffer, if live.
 Every window showing it stays on the note it showed."
-  (when-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name)))
+  (when-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name))
+              ((not (buffer-local-value 'agent-shell-notes-edit-mode buffer))))
     (let ((windows (mapcar (lambda (window)
                              (cons window (get-text-property
                                            (window-point window)
@@ -476,6 +587,152 @@ Every window showing it stays on the note it showed."
     (unless pos
       (user-error "No previous note"))
     (goto-char pos)))
+
+;;;; Marks
+
+(defun agent-shell-notes--show-mark (id beg end)
+  "Draw the mark indicator of note ID, which spans BEG to END."
+  (let ((ov (make-overlay beg end nil t)))
+    (overlay-put ov 'agent-shell-notes-mark id)
+    (overlay-put ov 'evaporate t)
+    (cond
+     ((eq agent-shell-notes-mark-indicator 'background)
+      (overlay-put ov 'face 'agent-shell-notes-mark))
+     ((display-graphic-p)
+      (overlay-put ov 'before-string
+                   (propertize "*" 'display '(left-fringe
+                                              filled-rectangle
+                                              agent-shell-notes-mark))))
+     (t
+      (setq left-margin-width 1)
+      (dolist (window (get-buffer-window-list nil nil t))
+        (set-window-margins window 1 (cdr (window-margins window))))
+      (overlay-put ov 'before-string
+                   (propertize "*" 'display
+                               `((margin left-margin)
+                                 ,(propertize "*" 'face
+                                              'agent-shell-notes-mark))))))))
+
+(defun agent-shell-notes--note-end (pos)
+  "Return the end of the review note at POS."
+  (or (next-single-property-change pos 'agent-shell-notes-id)
+      (point-max)))
+
+(defun agent-shell-notes--apply-marks ()
+  "Redraw the mark indicators of the current review buffer."
+  (dolist (ov (overlays-in (point-min) (point-max)))
+    (when (overlay-get ov 'agent-shell-notes-mark)
+      (delete-overlay ov)))
+  (let ((pos (point-min)))
+    (while (setq pos (text-property-not-all pos (point-max)
+                                            'agent-shell-notes-id nil))
+      (let ((id (get-text-property pos 'agent-shell-notes-id))
+            (end (agent-shell-notes--note-end pos)))
+        (when (memq id agent-shell-notes--marks)
+          (agent-shell-notes--show-mark id pos end))
+        (setq pos end)))))
+
+(defun agent-shell-notes--set-marks (marked)
+  "Set the marks of every note to MARKED, then show them."
+  (setq agent-shell-notes--marks marked)
+  (when-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name)))
+    (with-current-buffer buffer
+      (agent-shell-notes--apply-marks))))
+
+(defun agent-shell-notes--ids-at-point ()
+  "Return the ids of the notes the region touches, else the note at point.
+Signal `user-error' when there is none."
+  (let ((ids
+         (if (use-region-p)
+             (let ((pos (region-beginning))
+                   (end (region-end))
+                   ids)
+               (while (< pos end)
+                 (when-let* ((id (get-text-property
+                                  pos 'agent-shell-notes-id)))
+                   (push id ids))
+                 (setq pos (next-single-property-change
+                            pos 'agent-shell-notes-id nil end)))
+               (nreverse ids))
+           (when-let* ((id (get-text-property (point) 'agent-shell-notes-id)))
+             (list id)))))
+    (or ids (user-error "No note at point"))))
+
+(defun agent-shell-notes--mark-at-point (mark)
+  "Mark the notes at point when MARK is non-nil, else unmark them.
+Then move to the note after the last one, if any."
+  (let* ((ids (agent-shell-notes--ids-at-point))
+         (last (car (last ids))))
+    (deactivate-mark)
+    (agent-shell-notes--set-marks
+     (if mark
+         (seq-union agent-shell-notes--marks ids)
+       (seq-difference agent-shell-notes--marks ids)))
+    (goto-char (agent-shell-notes--note-start
+                (text-property-any (point-min) (point-max)
+                                   'agent-shell-notes-id last)))
+    (ignore-errors (agent-shell-notes-next-note))))
+
+(defun agent-shell-notes-mark ()
+  "Mark the note at point, or every note the region touches.
+Then move to the next note."
+  (interactive)
+  (agent-shell-notes--mark-at-point t))
+
+(defun agent-shell-notes-unmark ()
+  "Unmark the note at point, or every note the region touches.
+Then move to the next note."
+  (interactive)
+  (agent-shell-notes--mark-at-point nil))
+
+(defun agent-shell-notes-toggle-marks ()
+  "Invert the mark of every note that is not archived.
+With no note marked, this marks them all."
+  (interactive)
+  (agent-shell-notes--set-marks
+   (delq nil
+         (mapcar (lambda (note)
+                   (let* ((id (alist-get :id note))
+                          (marked (memq id agent-shell-notes--marks)))
+                     (when (if (alist-get :archived note) marked (not marked))
+                       id)))
+                 agent-shell-notes--notes))))
+
+(defun agent-shell-notes-unmark-all ()
+  "Unmark every note."
+  (interactive)
+  (agent-shell-notes--set-marks nil))
+
+(defun agent-shell-notes-delete ()
+  "Delete the note at point, without confirmation."
+  (interactive)
+  (let ((id (get-text-property (point) 'agent-shell-notes-id)))
+    (unless id
+      (user-error "No note at point"))
+    (setq agent-shell-notes--notes
+          (seq-remove (lambda (note) (eql id (alist-get :id note)))
+                      agent-shell-notes--notes)
+          agent-shell-notes--unfolded (delq id agent-shell-notes--unfolded)
+          agent-shell-notes--marks (delq id agent-shell-notes--marks))
+    (agent-shell-notes--review-draw)))
+
+(defun agent-shell-notes-delete-marked ()
+  "Delete the marked notes, after confirmation."
+  (interactive)
+  (let ((ids (seq-filter (lambda (id) (memq id agent-shell-notes--marks))
+                         (mapcar (lambda (note) (alist-get :id note))
+                                 agent-shell-notes--notes))))
+    (unless ids
+      (user-error "No marked notes"))
+    (when (yes-or-no-p (format "Delete %d marked note%s? "
+                               (length ids) (if (cdr ids) "s" "")))
+      (setq agent-shell-notes--notes
+            (seq-remove (lambda (note) (memq (alist-get :id note) ids))
+                        agent-shell-notes--notes)
+            agent-shell-notes--unfolded
+            (seq-difference agent-shell-notes--unfolded ids)
+            agent-shell-notes--marks nil)
+      (agent-shell-notes--review-draw))))
 
 (defun agent-shell-notes-redraw ()
   "Redraw the review from the note list."
