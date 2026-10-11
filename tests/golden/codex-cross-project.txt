@@ -1,0 +1,32 @@
+# Diff comments:
+
+## User Comment 1
+File: src/foo.el
+Workspace: /proj/a
+Lines: 3
+```elisp
+x
+```
+Comment:
+here
+
+## User Comment 2
+File: src/foo.el
+Workspace: /proj/a
+Side: R
+Lines: 41
+Diff hunk:
+```diff
+@@ -40,6 +40,7 @@ (defun foo
+ (defun foo ()
++  (let ((cache (make-hash-table)))
+     (puthash key value cache)
+```
+Comment:
+and here
+
+## User Comment 3
+Files: src/a.el
+Workspace: /proj/a
+Comment:
+this too

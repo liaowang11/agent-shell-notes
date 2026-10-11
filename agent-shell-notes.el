@@ -476,7 +476,20 @@ Relative to DIR, default the note's project."
 (defcustom agent-shell-notes-style 'claude
   "The wire format a send renders notes in."
   :type '(choice (const :tag "Claude desktop" claude)
+                 (const :tag "Codex app" codex)
                  (const :tag "oh-my-pi /annotate" omp)))
+
+;;;###autoload
+(defun agent-shell-notes-set-style (style)
+  "Set `agent-shell-notes-style' to STYLE for this Emacs session."
+  (interactive
+   (list (intern (completing-read
+                  (format "Style (now %s): " agent-shell-notes-style)
+                  (mapcar (lambda (choice) (symbol-name (car (last choice))))
+                          (cdr (get 'agent-shell-notes-style 'custom-type)))
+                  nil t))))
+  (setq agent-shell-notes-style style)
+  (message "Style: %s" style))
 
 (defcustom agent-shell-notes-fence-languages
   '(("el" . "elisp") ("py" . "python") ("ts" . "typescript")
@@ -686,6 +699,8 @@ path.  SESSION-ID is the target's session id: transcript notes from
 that session are own-session notes (`claude' places them first as
 reply blocks).  TURN-COUNT is the target's number of turns."
   (pcase agent-shell-notes-style
+    ('codex (agent-shell-notes--codex-render notes request project
+                                             session-id))
     ('omp (agent-shell-notes--omp-render notes request project
                                          session-id turn-count))
     (_ (agent-shell-notes--claude-render notes request project session-id))))
@@ -715,6 +730,137 @@ See `agent-shell-notes--render' for the arguments."
                                    rest
                                    (string-trim request)))
                  "\n\n\n")))
+
+;;;;; Codex
+
+(defun agent-shell-notes--codex-workspace (note project)
+  "Return NOTE's `Workspace:' line for a target in PROJECT, or nil.
+Only when PROJECT is non-nil and differs from the note's project."
+  (let ((own (file-name-as-directory (expand-file-name
+                                      (alist-get :project note)))))
+    (when (and project
+               (not (equal own (file-name-as-directory
+                                (expand-file-name project)))))
+      (concat "Workspace: " (directory-file-name own)))))
+
+(defun agent-shell-notes--codex-lines (location)
+  "Return the `Lines:' line of LOCATION: `Lines: S-E', or `Lines: N'."
+  (let ((start (plist-get location :start))
+        (end (plist-get location :end)))
+    (if (eql start end)
+        (format "Lines: %d" start)
+      (format "Lines: %d-%d" start end))))
+
+(defun agent-shell-notes--codex-fenced (lang text)
+  "Return TEXT in a fence with info string LANG."
+  (let ((fence (agent-shell-notes--fence text)))
+    (concat fence lang "\n" text "\n" fence)))
+
+(defun agent-shell-notes--codex-comment (note n project)
+  "Return the `## User Comment N' block of NOTE for a target in PROJECT.
+NOTE is a `magit', `file', `dired' or `buffer' note."
+  (let* ((loc (alist-get :location note))
+         (body
+          (pcase (alist-get :source note)
+            ('magit
+             (list (concat "File: " (plist-get loc :file))
+                   (agent-shell-notes--codex-workspace note project)
+                   ;; A mixed selection is a new-side one.
+                   (if (eq (plist-get loc :side) 'old) "Side: L" "Side: R")
+                   (agent-shell-notes--codex-lines loc)
+                   "Diff hunk:"
+                   (agent-shell-notes--codex-fenced
+                    "diff" (mapconcat (lambda (hunk)
+                                        (string-remove-suffix "\n" hunk))
+                                      (plist-get loc :hunks) "\n"))))
+            ('file
+             (list (concat "File: " (file-relative-name
+                                     (plist-get loc :file)
+                                     (alist-get :project note)))
+                   (agent-shell-notes--codex-workspace note project)
+                   (agent-shell-notes--codex-lines loc)
+                   (agent-shell-notes--codex-fenced
+                    (agent-shell-notes--fence-language (plist-get loc :file))
+                    (agent-shell-notes--trim-lines (alist-get :quote note)))))
+            ('dired
+             (list (concat "Files: " (agent-shell-notes--dired-names note))
+                   (agent-shell-notes--codex-workspace note project)))
+            ;; `buffer', and any source added by the user.  The buffer
+            ;; has no path, so no `Workspace:'.
+            (_
+             (list (format "Buffer: %s (%s)"
+                           (plist-get loc :buffer) (plist-get loc :mode))
+                   (agent-shell-notes--codex-lines loc)
+                   (agent-shell-notes--codex-fenced
+                    "text"
+                    (agent-shell-notes--trim-lines (alist-get :quote note))))))))
+    (string-join (append (list (format "## User Comment %d" n))
+                         (delq nil body)
+                         (list "Comment:" (alist-get :text note)))
+                 "\n")))
+
+(defconst agent-shell-notes--codex-annotations-instruction
+  "Each item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment. For every annotation you address, include its inline directive `:codex-annotation{index=\"N\"}`, where N is its one-based array position (for example, `:codex-annotation{index=\"1\"}`). Do not use unstructured annotation labels."
+  "The Codex app's instruction under `# Response annotations:', verbatim.")
+
+(defun agent-shell-notes--codex-annotations (notes)
+  "Return the `# Response annotations:' section of transcript NOTES.
+A JSON array of `text' and, when the note text is not empty,
+`annotation'.  The app's `source' field is dropped."
+  (let ((json (json-serialize
+               (vconcat
+                (mapcar (lambda (note)
+                          (let ((text (string-trim (alist-get :text note))))
+                            `((text . ,(agent-shell-notes--trim-lines
+                                        (alist-get :quote note)))
+                              ,@(unless (string-empty-p text)
+                                  `((annotation . ,text))))))
+                        notes)))))
+    (string-join
+     (list "# Response annotations:"
+           agent-shell-notes--codex-annotations-instruction
+           "<response-annotations>"
+           ;; Emacs 30 and later return UTF-8 bytes.
+           (if (multibyte-string-p json) json (decode-coding-string json 'utf-8))
+           "</response-annotations>")
+     "\n")))
+
+(defun agent-shell-notes--codex-render (notes request project session-id)
+  "Return NOTES and REQUEST in the `codex' style for a target in PROJECT.
+Sections in the Codex app's order: transcript notes from SESSION-ID as
+response annotations, quotes from other sessions, diff comments for
+the rest, then `## My request:'."
+  (let* ((n 0)
+         (own (seq-filter
+               (lambda (note)
+                 (and session-id
+                      (eq (alist-get :source note) 'transcript)
+                      (equal session-id (plist-get (alist-get :location note)
+                                                   :session-id))))
+               notes))
+         (quotes (seq-filter (lambda (note)
+                               (and (eq (alist-get :source note) 'transcript)
+                                    (not (memq note own))))
+                             notes))
+         (comments
+          (mapcar (lambda (note)
+                    (agent-shell-notes--codex-comment note (cl-incf n) project))
+                  (seq-remove (lambda (note)
+                                (eq (alist-get :source note) 'transcript))
+                              notes)))
+         (sections
+          (append
+           (when own (list (agent-shell-notes--codex-annotations own)))
+           (mapcar #'agent-shell-notes--claude-quote-block quotes)
+           (when comments
+             (list (string-join (cons "# Diff comments:" comments) "\n\n")))))
+         (request (string-trim request)))
+    (cond ((null sections) request)
+          ((string-empty-p request)
+           (string-trim-right (string-join sections "\n\n")))
+          (t (string-join (append sections
+                                  (list (concat "## My request:\n" request)))
+                          "\n\n")))))
 
 ;;;; The omp style
 

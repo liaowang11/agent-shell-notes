@@ -1,0 +1,16 @@
+# Diff comments:
+
+## User Comment 1
+File: src/foo.el
+Side: R
+Lines: 1-2
+Diff hunk:
+```diff
+@@ -1,2 +1,2 @@
+-(old)
++(new)
+ (ctx)
+\ No newline at end of file
+```
+Comment:
+check

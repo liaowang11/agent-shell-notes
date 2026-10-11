@@ -1,0 +1,10 @@
+# Diff comments:
+
+## User Comment 1
+Files: src/a.el, src/b.el
+Comment:
+rename these
+
+## User Comment 2
+Files: docs/x.md
+Comment:

@@ -1,0 +1,22 @@
+# Diff comments:
+
+## User Comment 1
+File: src/foo.el
+Side: R
+Lines: 42-43
+Diff hunk:
+```diff
+@@ -40,6 +40,7 @@ (defun foo
+ (defun foo ()
++  (let ((cache (make-hash-table)))
+     (puthash key value cache)
+@@ -60,3 +61,3 @@
+-old
++new
+ ctx
+```
+Comment:
+hoist it
+
+## My request:
+fix it

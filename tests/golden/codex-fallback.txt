@@ -1,0 +1,19 @@
+# Diff comments:
+
+## User Comment 1
+Buffer: *Help* (help-mode)
+Lines: 3-4
+```text
+Signature
+(foo ARG)
+```
+Comment:
+is ARG optional?
+
+## User Comment 2
+Buffer: *scratch* (lisp-interaction-mode)
+Lines: 1
+```text
+(+ 1 2)
+```
+Comment:

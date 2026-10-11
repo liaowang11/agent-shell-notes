@@ -3059,6 +3059,196 @@ Built by hand: batch Emacs never redisplays, so `posn-at-point' fails."
           (should (eq buf (current-buffer)))
           (should (= (point) (agent-shell-notes-tests--line-start buf 3))))))))
 
+;;;; Codex style
+
+(defun agent-shell-notes-tests--codex (notes request project &optional session)
+  "Render NOTES and REQUEST in the `codex' style for PROJECT and SESSION."
+  (let ((agent-shell-notes-style 'codex))
+    (agent-shell-notes--render notes request project session)))
+
+(defconst agent-shell-notes-tests--codex-hunks
+  (list (concat "@@ -40,6 +40,7 @@ (defun foo\n"
+                " (defun foo ()\n"
+                "+  (let ((cache (make-hash-table)))\n"
+                "     (puthash key value cache)\n")
+        "@@ -60,3 +61,3 @@\n-old\n+new\n ctx\n")
+  "Two hunks a `magit' note of the codex goldens touches.")
+
+(ert-deftest agent-shell-notes-set-style-switches-the-session-style ()
+  (should (eq 'claude (default-value 'agent-shell-notes-style)))
+  (let ((agent-shell-notes-style agent-shell-notes-style)
+        offered)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _)
+                 (setq offered collection)
+                 "codex")))
+      (call-interactively #'agent-shell-notes-set-style))
+    (should (eq 'codex agent-shell-notes-style))
+    (should (member "claude" offered))
+    (should (member "codex" offered))
+    (should (member "omp" offered))
+    (should (string-prefix-p "# Diff comments:"
+                             (agent-shell-notes--render
+                              (list (agent-shell-notes-tests--file-note
+                                     1 "/proj/a/" "a.el" 1 1 "x" "y"))
+                              "" "/proj/a/")))))
+
+(ert-deftest agent-shell-notes-render-codex-diff ()
+  (should (equal (agent-shell-notes-tests--golden "codex-diff")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--magit-note
+                         1 "/proj/a/" "src/foo.el" :side 'new :start 42 :end 43
+                         :type 'unstaged :mixed nil :text "hoist it"
+                         :hunks agent-shell-notes-tests--codex-hunks
+                         :quote "+  (let ((cache (make-hash-table)))"))
+                  "fix it" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-codex-diff-old-side-and-mixed ()
+  (should (equal (agent-shell-notes-tests--golden "codex-diff-old-side")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--magit-note
+                         1 "/proj/a/" "src/foo.el" :side 'old :start 7 :end 8
+                         :type 'committed :rev "HEAD" :mixed nil
+                         :text "why removed" :quote "-(old-a)\n-(old-b)"
+                         :hunks (list (concat "@@ -5,4 +5,2 @@\n ctx\n"
+                                              "-(old-a)\n-(old-b)\n ctx2\n"))))
+                  "" "/proj/a/")))
+  (should (equal (agent-shell-notes-tests--golden "codex-diff-mixed")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--magit-note
+                         1 "/proj/a/" "src/foo.el" :side 'new :start 1 :end 2
+                         :type 'staged :mixed t :text "check"
+                         :quote "-(old)\n+(new)\n (ctx)"
+                         :hunks (list (concat "@@ -1,2 +1,2 @@\n-(old)\n+(new)\n"
+                                              " (ctx)\n"
+                                              "\\ No newline at end of file\n"))))
+                  "" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-codex-file ()
+  (should (equal (agent-shell-notes-tests--golden "codex-file")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "src/foo.el" 3 3
+                         "(let ((cache (make-hash-table)))" "hoist the cache")
+                        (agent-shell-notes-tests--file-note
+                         2 "/proj/a/" "src/foo.el" 10 11
+                         "  (puthash key value cache)  \n  cache)\t" ""))
+                  "\n fix both, then run make check \n\n"
+                  "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-codex-dired ()
+  (should (equal (agent-shell-notes-tests--golden "codex-dired")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--dired-note
+                         1 "/proj/a/" "src/" '("src/a.el" "src/b.el")
+                         "rename these")
+                        (agent-shell-notes-tests--dired-note
+                         2 "/proj/a/" "docs/" '("docs/x.md") ""))
+                  "" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-codex-fallback ()
+  ;; A buffer has no path, so another project adds no `Workspace:'.
+  (should (equal (agent-shell-notes-tests--golden "codex-fallback")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--buffer-note
+                         1 "*Help*" 'help-mode 3 4
+                         "Signature  \n(foo ARG)" "is ARG optional?")
+                        (agent-shell-notes-tests--buffer-note
+                         2 "*scratch*" 'lisp-interaction-mode 1 1
+                         "(+ 1 2)" ""))
+                  "" "/proj/b/"))))
+
+(ert-deftest agent-shell-notes-render-codex-cross-project ()
+  (let ((notes (list (agent-shell-notes-tests--file-note
+                      1 "/proj/a/" "src/foo.el" 3 3 "x" "here")
+                     (agent-shell-notes-tests--magit-note
+                      2 "/proj/a/" "src/foo.el" :side 'new :start 41 :end 41
+                      :type 'unstaged :mixed nil :text "and here"
+                      :quote "+  (let ((cache (make-hash-table)))"
+                      :hunks (list (car agent-shell-notes-tests--codex-hunks)))
+                     (agent-shell-notes-tests--dired-note
+                      3 "/proj/a/" "src/" '("src/a.el") "this too"))))
+    (should (equal (agent-shell-notes-tests--golden "codex-cross-project")
+                   (agent-shell-notes-tests--codex notes "" "/proj/b/")))
+    ;; Same project spelled without the slash, or no target (copy): none.
+    (should-not (string-match-p "Workspace:"
+                                (agent-shell-notes-tests--codex
+                                 notes "" "/proj/a")))
+    (should-not (string-match-p "Workspace:"
+                                (agent-shell-notes-tests--codex notes "" nil)))))
+
+(ert-deftest agent-shell-notes-render-codex-reply-own-session ()
+  ;; JSON as the app's JSON.stringify writes it: `/' and non-ASCII
+  ;; raw, short escapes; no `annotation' key for an empty note text.
+  (should (equal (agent-shell-notes-tests--golden "codex-reply-own-session")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "src/foo.el" 42 43
+                         (concat "  (let ((cache (make-hash-table)))\n"
+                                 "    (puthash key value cache)")
+                         "the cache is created on every call; hoist it")
+                        (agent-shell-notes-tests--transcript-note
+                         2 "s1"
+                         "I removed the retry loop because it was never reached."
+                         (concat "it is reached when the socket closes early;"
+                                 " check `foo-connect`"))
+                        (agent-shell-notes-tests--transcript-note
+                         3 "s1" "path a/b \"q\" \\ é  \n\tnext" ""))
+                  "fix both, then run make check" "/proj/a/" "s1"))))
+
+(ert-deftest agent-shell-notes-render-codex-reply-other-session ()
+  (let ((notes (list (agent-shell-notes-tests--transcript-note
+                      1 "s2" "The answer is 42." "why 42?"))))
+    (should (equal (agent-shell-notes-tests--golden "codex-reply-other-session")
+                   (agent-shell-notes-tests--codex notes "explain" "/proj/a/" "s1")))
+    ;; No target session (copy): a quote from another session too.
+    (should (equal (agent-shell-notes-tests--golden "codex-reply-other-session")
+                   (agent-shell-notes-tests--codex notes "explain" nil)))))
+
+(ert-deftest agent-shell-notes-render-codex-request-only ()
+  ;; The app adds `## My request:' only after a section.
+  (should (equal (agent-shell-notes-tests--golden "codex-request-only")
+                 (agent-shell-notes-tests--codex
+                  nil " fix both, then run make check \n" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-codex-mixed-batch ()
+  ;; Section order, not review order; comments numbered across the
+  ;; section in review order.
+  (should (equal (agent-shell-notes-tests--golden "codex-mixed-batch")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "a.el" 1 1 "x" "fa")
+                        (agent-shell-notes-tests--transcript-note
+                         2 "s1" "own one\n\npara two" "c1")
+                        (agent-shell-notes-tests--transcript-note
+                         3 "s2" "other quote" "o1")
+                        (agent-shell-notes-tests--dired-note
+                         4 "/proj/a/" "src/" '("src/a.el") "d1")
+                        (agent-shell-notes-tests--transcript-note
+                         5 "s1" "own quote only" "")
+                        (agent-shell-notes-tests--transcript-note
+                         6 "s3" "third session" "")
+                        (agent-shell-notes-tests--buffer-note
+                         7 "*Help*" 'help-mode 2 2 "h" "b1")
+                        (agent-shell-notes-tests--transcript-note
+                         8 "s1" "own two" "c2"))
+                  "req" "/proj/a/" "s1"))))
+
+(ert-deftest agent-shell-notes-render-codex-numbering-restarts-per-send ()
+  (should (string-match-p
+           "^## User Comment 2$"
+           (agent-shell-notes-tests--codex
+            (list (agent-shell-notes-tests--file-note
+                   1 "/proj/a/" "a.el" 1 1 "x" "one")
+                  (agent-shell-notes-tests--file-note
+                   2 "/proj/a/" "a.el" 2 2 "y" "two"))
+            "" "/proj/a/")))
+  (should (equal (agent-shell-notes-tests--golden "codex-numbering")
+                 (agent-shell-notes-tests--codex
+                  (list (agent-shell-notes-tests--file-note
+                         3 "/proj/a/" "a.el" 3 3 "z" "three"))
+                  "" "/proj/a/"))))
+
 ;;;; The omp style
 
 (defmacro agent-shell-notes-tests--omp (&rest body)

@@ -1,0 +1,39 @@
+# Response annotations:
+Each item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment. For every annotation you address, include its inline directive `:codex-annotation{index="N"}`, where N is its one-based array position (for example, `:codex-annotation{index="1"}`). Do not use unstructured annotation labels.
+<response-annotations>
+[{"text":"own one\n\npara two","annotation":"c1"},{"text":"own quote only"},{"text":"own two","annotation":"c2"}]
+</response-annotations>
+
+> other quote
+
+o1
+
+> third session
+
+# Diff comments:
+
+## User Comment 1
+File: a.el
+Lines: 1
+```elisp
+x
+```
+Comment:
+fa
+
+## User Comment 2
+Files: src/a.el
+Comment:
+d1
+
+## User Comment 3
+Buffer: *Help* (help-mode)
+Lines: 2
+```text
+h
+```
+Comment:
+b1
+
+## My request:
+req

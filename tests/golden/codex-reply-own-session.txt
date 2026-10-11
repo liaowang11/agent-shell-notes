@@ -1,0 +1,20 @@
+# Response annotations:
+Each item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment. For every annotation you address, include its inline directive `:codex-annotation{index="N"}`, where N is its one-based array position (for example, `:codex-annotation{index="1"}`). Do not use unstructured annotation labels.
+<response-annotations>
+[{"text":"I removed the retry loop because it was never reached.","annotation":"it is reached when the socket closes early; check `foo-connect`"},{"text":"path a/b \"q\" \\ é\n\tnext"}]
+</response-annotations>
+
+# Diff comments:
+
+## User Comment 1
+File: src/foo.el
+Lines: 42-43
+```elisp
+  (let ((cache (make-hash-table)))
+    (puthash key value cache)
+```
+Comment:
+the cache is created on every call; hoist it
+
+## My request:
+fix both, then run make check

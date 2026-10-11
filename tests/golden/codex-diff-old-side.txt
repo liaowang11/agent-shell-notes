@@ -1,0 +1,16 @@
+# Diff comments:
+
+## User Comment 1
+File: src/foo.el
+Side: L
+Lines: 7-8
+Diff hunk:
+```diff
+@@ -5,4 +5,2 @@
+ ctx
+-(old-a)
+-(old-b)
+ ctx2
+```
+Comment:
+why removed

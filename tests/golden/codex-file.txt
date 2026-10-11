@@ -1,0 +1,23 @@
+# Diff comments:
+
+## User Comment 1
+File: src/foo.el
+Lines: 3
+```elisp
+(let ((cache (make-hash-table)))
+```
+Comment:
+hoist the cache
+
+## User Comment 2
+File: src/foo.el
+Lines: 10-11
+```elisp
+  (puthash key value cache)
+  cache)
+```
+Comment:
+
+
+## My request:
+fix both, then run make check
