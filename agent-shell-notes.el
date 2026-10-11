@@ -35,6 +35,10 @@
   '((t :inherit font-lock-comment-face))
   "Face of a note's location line.")
 
+(defface agent-shell-notes-tag
+  '((t :inherit font-lock-constant-face))
+  "Face of a note's tags in the review, such as `unstaged'.")
+
 ;;;; Notes
 
 (defvar agent-shell-notes--notes nil
@@ -88,6 +92,148 @@ ending at the start of a line does not touch that line."
   (pcase-let ((`(,beg ,end ,start ,last) (agent-shell-notes--line-extent)))
     (list :location (list :file buffer-file-name :start start :end last)
           :quote (buffer-substring-no-properties beg end)
+          :beg beg
+          :end end)))
+
+;;;;; Magit
+
+;; Magit is optional: nothing here runs unless a Magit buffer is current,
+;; and Magit is loaded by then.
+(declare-function magit-section-at "magit-section" (&optional position))
+(declare-function magit-diff-hunk-line "magit-diff" (section goto-from))
+(declare-function magit-diff-type "magit-diff" (&optional section))
+(declare-function eieio-oref "eieio-core" (obj slot))
+(defvar magit-buffer-diff-range)
+(defvar magit-buffer-revision)
+
+(defun agent-shell-notes--magit-slot (section slot)
+  "Return SLOT of the Magit SECTION."
+  (eieio-oref section slot))
+
+(defun agent-shell-notes--magit-file-section (section)
+  "Return the file section SECTION is or belongs to, else nil."
+  (pcase (and section (agent-shell-notes--magit-slot section 'type))
+    ('file section)
+    ('hunk (agent-shell-notes--magit-slot section 'parent))))
+
+(defun agent-shell-notes--magit-p ()
+  "Return non-nil in a Magit buffer with a diff section under point or region."
+  (and (derived-mode-p 'magit-section-mode)
+       (fboundp 'magit-diff-hunk-line)
+       (pcase-let ((`(,beg ,end) (agent-shell-notes--line-extent)))
+         (or (agent-shell-notes--magit-file-section (magit-section-at beg))
+             (agent-shell-notes--magit-file-section (magit-section-at end))))))
+
+(defun agent-shell-notes--magit-lines (beg end)
+  "Return the hunks and body lines touched by the lines from BEG to END.
+The value is (HUNKS . LINES): HUNKS the hunk sections in order, LINES
+a list of (POS HUNK CHAR) for each hunk body line, CHAR its prefix.
+Signal `user-error' when the lines cross files or touch no hunk."
+  (let (files hunks lines)
+    (save-excursion
+      (goto-char beg)
+      (while (progn
+               (let* ((pos (point))
+                      (section (magit-section-at pos))
+                      (file (agent-shell-notes--magit-file-section section)))
+                 (when (and file (not (memq file files)))
+                   (push file files))
+                 (when (and section
+                            (eq (agent-shell-notes--magit-slot section 'type)
+                                'hunk))
+                   (unless (memq section hunks)
+                     (push section hunks))
+                   (when (>= pos (agent-shell-notes--magit-slot
+                                  section 'content))
+                     (push (list pos section (char-after pos)) lines))))
+               (and (zerop (forward-line 1))
+                    (not (eobp))
+                    (<= (point) end)))))
+    (when (cdr files)
+      (user-error "The region crosses files"))
+    (unless hunks
+      (user-error "Point is not in a hunk"))
+    (when (seq-some (lambda (h) (agent-shell-notes--magit-slot h 'combined))
+                    hunks)
+      (user-error "Merge diffs are not supported"))
+    (cons (nreverse hunks) (nreverse lines))))
+
+(defun agent-shell-notes--magit-hunk-body (hunk)
+  "Return (POS HUNK CHAR) for every body line of HUNK."
+  (let ((end (agent-shell-notes--magit-slot hunk 'end))
+        lines)
+    (save-excursion
+      (goto-char (agent-shell-notes--magit-slot hunk 'content))
+      (while (< (point) end)
+        (push (list (point) hunk (char-after)) lines)
+        (forward-line 1)))
+    (nreverse lines)))
+
+(defun agent-shell-notes--magit-line (line goto-from)
+  "Return the number Magit maps body LINE to, old side if GOTO-FROM."
+  (unless line
+    (user-error "No diff line selected"))
+  (save-excursion
+    (goto-char (car line))
+    (or (magit-diff-hunk-line (nth 1 line) goto-from)
+        (user-error "Magit cannot map this line"))))
+
+(defun agent-shell-notes--magit-extract ()
+  "Extract a `magit' note from the hunk lines at point or in the region.
+Point on a hunk heading with no region takes the whole hunk.  The side
+is old when every line is a deletion, else new.  Line numbers are
+Magit's mapping of the first and last selected line of that side: a
+heading maps wrong, and a `-' line maps to the next new line."
+  (pcase-let* ((`(,beg ,end) (agent-shell-notes--line-extent))
+               (`(,hunks . ,lines) (agent-shell-notes--magit-lines beg end))
+               (whole (null lines))
+               (lines (or lines (mapcan #'agent-shell-notes--magit-hunk-body
+                                        hunks)))
+               (sided (seq-remove (lambda (line) (eq (nth 2 line) ?\\))
+                                  lines))
+               (old (and sided
+                         (seq-every-p (lambda (line) (eq (nth 2 line) ?-))
+                                      sided)))
+               (mixed (and (seq-some (lambda (line) (eq (nth 2 line) ?-))
+                                     sided)
+                           (seq-some (lambda (line) (eq (nth 2 line) ?+))
+                                     sided)
+                           t))
+               (own (if old
+                        sided
+                      (seq-remove (lambda (line) (eq (nth 2 line) ?-))
+                                  sided)))
+               (start (agent-shell-notes--magit-line (car own) old))
+               (last (agent-shell-notes--magit-line (car (last own)) old))
+               (file-section (agent-shell-notes--magit-file-section
+                              (car hunks)))
+               (type (magit-diff-type (car hunks))))
+    (when whole
+      (setq beg (agent-shell-notes--magit-slot (car hunks) 'start)
+            end (agent-shell-notes--magit-slot (car (last hunks)) 'end)))
+    (list :location
+          (list :file (or (and old (agent-shell-notes--magit-slot
+                                    file-section 'source))
+                          (agent-shell-notes--magit-slot file-section 'value))
+                :side (if old 'old 'new)
+                :start start
+                :end last
+                :hunks (mapcar (lambda (hunk)
+                                 (buffer-substring-no-properties
+                                  (agent-shell-notes--magit-slot hunk 'start)
+                                  (agent-shell-notes--magit-slot hunk 'end)))
+                               hunks)
+                :type type
+                :rev (and (eq type 'committed)
+                          (or magit-buffer-revision magit-buffer-diff-range))
+                :mixed mixed)
+          :quote (mapconcat (lambda (line)
+                              (save-excursion
+                                (goto-char (car line))
+                                (buffer-substring-no-properties
+                                 (line-beginning-position)
+                                 (line-end-position))))
+                            lines "\n")
           :beg beg
           :end end)))
 
@@ -251,6 +397,7 @@ files, else the file at point."
 (defcustom agent-shell-notes-sources
   '((transcript agent-shell-notes--transcript-shell
                 agent-shell-notes--transcript-extract)
+    (magit agent-shell-notes--magit-p agent-shell-notes--magit-extract)
     (dired agent-shell-notes--dired-p agent-shell-notes--dired-extract)
     (file buffer-file-name agent-shell-notes--file-extract)
     (buffer always agent-shell-notes--buffer-extract))
@@ -300,6 +447,12 @@ its location should carry `:buffer', `:mode', `:start' and `:end', as
     (if (eql start end)
         (format "line %d" start)
       (format "lines %d-%d" start end))))
+
+(defun agent-shell-notes--note-file (note)
+  "Return the absolute path of NOTE's file.
+A `magit' note stores it relative to the note's project."
+  (expand-file-name (plist-get (alist-get :location note) :file)
+                    (alist-get :project note)))
 
 (defun agent-shell-notes--dired-names (note &optional dir)
   "Return the files of dired NOTE, comma-joined.
@@ -392,7 +545,7 @@ attachment marker get a `> ' in place of their leading blanks."
 Relative to the note's project, or absolute when PROJECT, if non-nil,
 is another project.  FILE, if non-nil, is the file instead of the
 note's `:file'."
-  (let ((file (or file (plist-get (alist-get :location note) :file)))
+  (let ((file (or file (agent-shell-notes--note-file note)))
         (own (alist-get :project note)))
     (if (and project
              (not (equal (file-name-as-directory (expand-file-name project))
@@ -400,15 +553,35 @@ note's `:file'."
         file
       (file-relative-name file own))))
 
+(defun agent-shell-notes--diff-side-lines (note)
+  "Return the quote lines of `magit' NOTE on its side, prefixes stripped.
+The new side keeps `+' and context lines, so a mixed selection drops
+its deletions; the old side keeps `-' lines."
+  (let ((keep (if (eq (plist-get (alist-get :location note) :side) 'old)
+                  '(?-)
+                '(?+ ?\s))))
+    (mapconcat (lambda (line) (substring line 1))
+               (seq-filter (lambda (line)
+                             (and (> (length line) 0)
+                                  (memq (aref line 0) keep)))
+                           (split-string (alist-get :quote note) "\n"))
+               "\n")))
+
 (defun agent-shell-notes--claude-file-block (note project)
-  "Return the Claude block of file NOTE for a target in PROJECT."
+  "Return the Claude block of file or `magit' NOTE for a target in PROJECT."
   (let* ((loc (alist-get :location note))
-         (quote (alist-get :quote note))
+         (diff (eq (alist-get :source note) 'magit))
+         (quote (if diff
+                    (agent-shell-notes--diff-side-lines note)
+                  (alist-get :quote note)))
          (text (alist-get :text note))
-         (lines (list (format "In `%s` at %s:"
+         (lines (list (format "In `%s` at %s%s:"
                               (agent-shell-notes--claude-path
                                (agent-shell-notes--note-path note project))
-                              (agent-shell-notes--range-string loc)))))
+                              (agent-shell-notes--range-string loc)
+                              (if (and diff (eq (plist-get loc :side) 'old))
+                                  " (before changes)"
+                                "")))))
     (when quote
       (let* ((snippet (agent-shell-notes--claude-snippet quote))
              (fence (agent-shell-notes--fence snippet)))
@@ -497,7 +670,7 @@ The buffer has no file to name a language, so the fence says `text'."
 (defun agent-shell-notes--claude-block (note project)
   "Return the Claude block of NOTE for a target in PROJECT."
   (pcase (alist-get :source note)
-    ('file (agent-shell-notes--claude-file-block note project))
+    ((or 'file 'magit) (agent-shell-notes--claude-file-block note project))
     ('transcript (agent-shell-notes--claude-quote-block note))
     ('dired (agent-shell-notes--claude-dired-block note project))
     ;; `buffer', and any source added by the user.
@@ -617,9 +790,10 @@ In the note area of the capture popup, do what TAB does in Markdown."
                                     (agent-shell-notes--kind-name
                                      (plist-get loc :kind))))
                     " — "))
-      ('file (concat (file-relative-name (plist-get loc :file)
-                                         (alist-get :project note))
-                     " " (agent-shell-notes--range-string loc)))
+      ((or 'file 'magit)
+       (concat (file-relative-name (agent-shell-notes--note-file note)
+                                   (alist-get :project note))
+               " " (agent-shell-notes--range-string loc)))
       ('dired (agent-shell-notes--dired-names note))
       ;; `buffer', and any source added by the user.
       (_ (format "%s (%s) %s" (plist-get loc :buffer)
@@ -882,8 +1056,8 @@ An emptied text keeps the note, quote only."
 (defun agent-shell-notes--group-key (note)
   "Return the key of the review group NOTE belongs to."
   (pcase (alist-get :source note)
-    ('file (cons (plist-get (alist-get :location note) :file)
-                 (alist-get :project note)))
+    ((or 'file 'magit) (cons (agent-shell-notes--note-file note)
+                             (alist-get :project note)))
     ('transcript (let ((loc (alist-get :location note)))
                    (list 'transcript
                          (or (plist-get loc :session-id) (plist-get loc :shell))
@@ -897,14 +1071,13 @@ An emptied text keeps the note, quote only."
 (defun agent-shell-notes--group-heading (note)
   "Return the review heading of the group NOTE belongs to."
   (pcase (alist-get :source note)
-    ('file (let ((project (alist-get :project note)))
-             (format "# %s — %s"
-                     (file-relative-name
-                      (plist-get (alist-get :location note) :file) project)
-                     (abbreviate-file-name
-                      (directory-file-name project)))))
+    ((or 'file 'magit)
+     (let ((project (alist-get :project note)))
+       (format "# %s — %s"
+               (file-relative-name (agent-shell-notes--note-file note)
+                                   project)
+               (abbreviate-file-name (directory-file-name project)))))
     ('transcript (concat "# " (agent-shell-notes--location-string note)))
-
     ('dired (let ((project (alist-get :project note)))
               (format "# %s — %s"
                       (file-relative-name
@@ -913,6 +1086,18 @@ An emptied text keeps the note, quote only."
                       (abbreviate-file-name
                        (directory-file-name project)))))
     (_ (format "# %s" (plist-get (alist-get :location note) :buffer)))))
+
+(defun agent-shell-notes--tags (note)
+  "Return the review tags of NOTE, a list of strings."
+  (let ((loc (alist-get :location note)))
+    (delq nil
+          (list (pcase (plist-get loc :type)
+                  ('staged "staged")
+                  ('unstaged "unstaged")
+                  ('committed (format "commit %s" (plist-get loc :rev))))
+                (and (eq (plist-get loc :side) 'old) "before changes")
+                (when-let* ((target (alist-get :archived note)))
+                  (format "sent to %s" target))))))
 
 (defun agent-shell-notes--groups ()
   "Return the notes as a list of groups, each a list of notes.
@@ -944,20 +1129,26 @@ group by line."
         (text (alist-get :text note)))
     (agent-shell-notes--insert-field
      'location
-     (propertize (concat (format "**%s**"
-                                 (pcase (alist-get :source note)
-                                   ('transcript (agent-shell-notes--kind-name
-                                                 (plist-get (alist-get :location note)
-                                                            :kind)))
-                                   ('dired (agent-shell-notes--dired-names
-                                            note (plist-get
-                                                  (alist-get :location note)
-                                                  :directory)))
-                                   (_ (agent-shell-notes--range-string
-                                       (alist-get :location note)))))
-                         (when-let* ((target (alist-get :archived note)))
-                           (format " `sent to %s`" target)))
-                 'face 'agent-shell-notes-location))
+     (mapconcat #'identity
+                (cons (propertize
+                       (format "**%s**"
+                               (pcase (alist-get :source note)
+                                 ('transcript (agent-shell-notes--kind-name
+                                               (plist-get
+                                                (alist-get :location note)
+                                                :kind)))
+                                 ('dired (agent-shell-notes--dired-names
+                                          note (plist-get
+                                                (alist-get :location note)
+                                                :directory)))
+                                 (_ (agent-shell-notes--range-string
+                                     (alist-get :location note)))))
+                       'face 'agent-shell-notes-location)
+                      (mapcar (lambda (tag)
+                                (propertize (format "`%s`" tag)
+                                            'face 'agent-shell-notes-tag))
+                              (agent-shell-notes--tags note)))
+                " "))
     (insert "\n")
     (agent-shell-notes--insert-quote
      note (memq id agent-shell-notes--unfolded))

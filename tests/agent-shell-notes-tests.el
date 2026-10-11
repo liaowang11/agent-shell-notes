@@ -1495,6 +1495,370 @@ The boundary must be stubbed by the caller."
                              'agent-shell-notes-id)))
         (should-not agent-shell-notes--marks)))))
 
+;;;; Magit capture
+
+(require 'magit)
+
+(defvar agent-shell-notes-tests--repo nil
+  "The temporary git repository of the Magit test running now.")
+
+(defun agent-shell-notes-tests--write (file lines)
+  "Write LINES to FILE in `default-directory', one per line."
+  (with-temp-file file
+    (insert (mapconcat #'identity lines "\n") "\n")))
+
+(defun agent-shell-notes-tests--foo-edited ()
+  "Return foo.txt's 30 lines after the test edits.
+Line 3 changed, line 5 deleted, \"new A\" and \"new B\" after line 25."
+  (let ((lines (agent-shell-notes-tests--lines 30)))
+    (setf (nth 2 lines) "line 3 changed")
+    (append (seq-take lines 4)
+            (seq-subseq lines 5 25)
+            '("new A" "new B")
+            (seq-drop lines 25))))
+
+(defmacro agent-shell-notes-tests--with-repo (&rest body)
+  "Run BODY in a fresh git repo holding foo.txt and bar.txt.
+Both files are committed, then edited in the worktree: foo.txt as
+`agent-shell-notes-tests--foo-edited', bar.txt with line 2 changed.
+Magit buffers of the repo are killed afterwards."
+  (declare (indent 0) (debug t))
+  `(let* ((agent-shell-notes-tests--repo
+           (file-truename
+            (file-name-as-directory (make-temp-file "asn-magit-" t))))
+          (default-directory agent-shell-notes-tests--repo)
+          (magit-git-global-arguments
+           (append (list "-c" "user.name=T" "-c" "user.email=t@example.com"
+                         "-c" "init.defaultBranch=main")
+                   magit-git-global-arguments)))
+     (unwind-protect
+         (agent-shell-notes-tests--with-clean-state
+           (magit-git "init" ".")
+           (agent-shell-notes-tests--write
+            "foo.txt" (agent-shell-notes-tests--lines 30))
+           (agent-shell-notes-tests--write
+            "bar.txt" (agent-shell-notes-tests--lines 4))
+           (magit-git "add" "foo.txt" "bar.txt")
+           (magit-git "commit" "-m" "init")
+           (agent-shell-notes-tests--write
+            "foo.txt" (agent-shell-notes-tests--foo-edited))
+           (agent-shell-notes-tests--write
+            "bar.txt" '("line 1" "line 2 changed" "line 3" "line 4"))
+           ,@body)
+       (dolist (buffer (buffer-list))
+         (when (and (buffer-live-p buffer)
+                    (string-prefix-p agent-shell-notes-tests--repo
+                                     (buffer-local-value 'default-directory
+                                                         buffer)))
+           (kill-buffer buffer)))
+       (delete-directory agent-shell-notes-tests--repo t))))
+
+(defun agent-shell-notes-tests--unstaged ()
+  "Return the unstaged diff buffer of the current repo."
+  (magit-diff-setup-buffer nil nil nil nil 'unstaged))
+
+(defun agent-shell-notes-tests--magit-select (buffer from &optional to)
+  "Show BUFFER with point at the start of the line matching FROM.
+With TO, activate a region from there to the end of the first line
+after it matching TO (the start of the next line)."
+  (switch-to-buffer buffer)
+  (transient-mark-mode 1)
+  (deactivate-mark)
+  (goto-char (agent-shell-notes-tests--search from))
+  (when to
+    (push-mark (point) t t)
+    (re-search-forward to)
+    (forward-line 1)))
+
+(defun agent-shell-notes-tests--magit-capture (buffer from &optional to text)
+  "Capture in BUFFER from the line matching FROM (through TO), save TEXT.
+Return the saved note."
+  (agent-shell-notes-tests--magit-select buffer from to)
+  (agent-shell-notes-capture)
+  (with-current-buffer "*agent-shell-notes capture*"
+    (goto-char (point-max))
+    (insert (or text ""))
+    (agent-shell-notes-capture-save))
+  (car (last agent-shell-notes--notes)))
+
+(defconst agent-shell-notes-tests--foo-hunk-1
+  (concat "@@ -1,8 +1,7 @@\n"
+          " line 1\n line 2\n-line 3\n+line 3 changed\n line 4\n"
+          "-line 5\n line 6\n line 7\n line 8\n")
+  "The first hunk of foo.txt's unstaged diff.")
+
+(defun agent-shell-notes-tests--location (note)
+  "Return NOTE's location with its keys in a fixed order."
+  (let ((loc (alist-get :location note)))
+    (mapcan (lambda (key) (list key (plist-get loc key)))
+            '(:file :side :start :end :type :rev :mixed))))
+
+(ert-deftest agent-shell-notes-magit-region-inside-a-hunk ()
+  (agent-shell-notes-tests--with-repo
+    (let ((note (agent-shell-notes-tests--magit-capture
+                 (agent-shell-notes-tests--unstaged)
+                 "^\\+line 3 changed$" "^ line 4$" "why")))
+      (should (eq 'magit (alist-get :source note)))
+      (should (equal agent-shell-notes-tests--repo (alist-get :project note)))
+      (should (equal '(:file "foo.txt" :side new :start 3 :end 4
+                       :type unstaged :rev nil :mixed nil)
+                     (agent-shell-notes-tests--location note)))
+      (should (equal (list agent-shell-notes-tests--foo-hunk-1)
+                     (plist-get (alist-get :location note) :hunks)))
+      (should (equal "+line 3 changed\n line 4" (alist-get :quote note)))
+      (should (equal "why" (alist-get :text note))))))
+
+(ert-deftest agent-shell-notes-magit-popup-names-the-file ()
+  (agent-shell-notes-tests--with-repo
+    (agent-shell-notes-tests--magit-select
+     (agent-shell-notes-tests--unstaged) "^\\+line 3 changed$" "^ line 4$")
+    (agent-shell-notes-capture)
+    (with-current-buffer "*agent-shell-notes capture*"
+      (should (string-prefix-p "foo.txt lines 3-4\n"
+                               (buffer-substring-no-properties
+                                (point-min) agent-shell-notes--text-start)))
+      (agent-shell-notes-capture-abort))))
+
+(ert-deftest agent-shell-notes-magit-line-at-point ()
+  (agent-shell-notes-tests--with-repo
+    (let ((note (agent-shell-notes-tests--magit-capture
+                 (agent-shell-notes-tests--unstaged) "^ line 6$")))
+      (should (equal '(:file "foo.txt" :side new :start 5 :end 5
+                       :type unstaged :rev nil :mixed nil)
+                     (agent-shell-notes-tests--location note)))
+      (should (equal " line 6" (alist-get :quote note))))))
+
+(ert-deftest agent-shell-notes-magit-hunk-heading-takes-the-whole-hunk ()
+  (agent-shell-notes-tests--with-repo
+    (let ((first (agent-shell-notes-tests--magit-capture
+                  (agent-shell-notes-tests--unstaged) "^@@ -1,8 \\+1,7 @@"))
+          (second (agent-shell-notes-tests--magit-capture
+                   (agent-shell-notes-tests--unstaged) "^@@ -23,6 \\+22,8 @@")))
+      ;; Every body line is selected; magit-diff-hunk-line on the
+      ;; heading itself would map the first changed line instead.
+      (should (equal '(:file "foo.txt" :side new :start 1 :end 7
+                       :type unstaged :rev nil :mixed t)
+                     (agent-shell-notes-tests--location first)))
+      (should (equal (list agent-shell-notes-tests--foo-hunk-1)
+                     (plist-get (alist-get :location first) :hunks)))
+      (should (equal (string-trim-right
+                      (string-remove-prefix "@@ -1,8 +1,7 @@\n"
+                                            agent-shell-notes-tests--foo-hunk-1))
+                     (alist-get :quote first)))
+      (should (equal '(:file "foo.txt" :side new :start 22 :end 29
+                       :type unstaged :rev nil :mixed nil)
+                     (agent-shell-notes-tests--location second))))))
+
+(ert-deftest agent-shell-notes-magit-file-heading-signals ()
+  (agent-shell-notes-tests--with-repo
+    (agent-shell-notes-tests--magit-select
+     (agent-shell-notes-tests--unstaged) "^modified +foo.txt")
+    (should (equal '(user-error "Point is not in a hunk")
+                   (should-error (agent-shell-notes-capture)
+                                 :type 'user-error)))
+    (should-not (get-buffer "*agent-shell-notes capture*"))))
+
+(ert-deftest agent-shell-notes-magit-region-across-hunks-is-one-note ()
+  (agent-shell-notes-tests--with-repo
+    (let ((note (agent-shell-notes-tests--magit-capture
+                 (agent-shell-notes-tests--unstaged)
+                 "^-line 5$" "^\\+new A$")))
+      (should (= 1 (length agent-shell-notes--notes)))
+      (should (equal '(:file "foo.txt" :side new :start 5 :end 25
+                       :type unstaged :rev nil :mixed t)
+                     (agent-shell-notes-tests--location note)))
+      (should (equal (list agent-shell-notes-tests--foo-hunk-1
+                           (concat "@@ -23,6 +22,8 @@ line 22\n"
+                                   " line 23\n line 24\n line 25\n"
+                                   "+new A\n+new B\n"
+                                   " line 26\n line 27\n line 28\n"))
+                     (plist-get (alist-get :location note) :hunks)))
+      ;; The hunk heading in between is not a selected line.
+      (should (equal (concat "-line 5\n line 6\n line 7\n line 8\n"
+                             " line 23\n line 24\n line 25\n+new A")
+                     (alist-get :quote note))))))
+
+(ert-deftest agent-shell-notes-magit-region-across-files-signals ()
+  (agent-shell-notes-tests--with-repo
+    (agent-shell-notes-tests--magit-select
+     (agent-shell-notes-tests--unstaged)
+     "^\\+line 2 changed$" "^\\+line 3 changed$")
+    (should (equal '(user-error "The region crosses files")
+                   (should-error (agent-shell-notes-capture)
+                                 :type 'user-error)))
+    (should-not agent-shell-notes--notes)))
+
+(ert-deftest agent-shell-notes-magit-deletions-only-are-the-old-side ()
+  (agent-shell-notes-tests--with-repo
+    (let ((region (agent-shell-notes-tests--magit-capture
+                   (agent-shell-notes-tests--unstaged) "^-line 3$" "^-line 3$"))
+          (point (agent-shell-notes-tests--magit-capture
+                  (agent-shell-notes-tests--unstaged) "^-line 5$")))
+      (should (equal '(:file "foo.txt" :side old :start 3 :end 3
+                       :type unstaged :rev nil :mixed nil)
+                     (agent-shell-notes-tests--location region)))
+      (should (equal "-line 3" (alist-get :quote region)))
+      (should (equal '(:file "foo.txt" :side old :start 5 :end 5
+                       :type unstaged :rev nil :mixed nil)
+                     (agent-shell-notes-tests--location point))))))
+
+(ert-deftest agent-shell-notes-magit-mixed-selection-ending-on-a-deletion ()
+  (agent-shell-notes-tests--with-repo
+    (let ((note (agent-shell-notes-tests--magit-capture
+                 (agent-shell-notes-tests--unstaged)
+                 "^\\+line 3 changed$" "^-line 5$")))
+      ;; The new lines selected are 3-4; Magit maps the trailing `-'
+      ;; line to the next new line, 5.
+      (should (equal '(:file "foo.txt" :side new :start 3 :end 4
+                       :type unstaged :rev nil :mixed t)
+                     (agent-shell-notes-tests--location note)))
+      (should (equal "+line 3 changed\n line 4\n-line 5"
+                     (alist-get :quote note))))))
+
+(ert-deftest agent-shell-notes-magit-staged-and-committed-types ()
+  (agent-shell-notes-tests--with-repo
+    (magit-git "add" "foo.txt")
+    (let ((staged (agent-shell-notes-tests--magit-capture
+                   (magit-diff-setup-buffer nil "--cached" nil nil 'staged)
+                   "^\\+line 3 changed$")))
+      (should (equal '(:file "foo.txt" :side new :start 3 :end 3
+                       :type staged :rev nil :mixed nil)
+                     (agent-shell-notes-tests--location staged))))
+    (magit-git "commit" "-m" "edit")
+    (let ((committed (agent-shell-notes-tests--magit-capture
+                      (magit-revision-setup-buffer "HEAD" nil nil)
+                      "^\\+new B$")))
+      (should (equal '(:file "foo.txt" :side new :start 26 :end 26
+                       :type committed :rev "HEAD" :mixed nil)
+                     (agent-shell-notes-tests--location committed))))))
+
+(ert-deftest agent-shell-notes-magit-status-hidden-hunk ()
+  ;; DESIGN §12 check 4: a hidden hunk's text is still in the status
+  ;; buffer, and magit-diff-hunk-line counts buffer lines, so hiding
+  ;; changes nothing.
+  (agent-shell-notes-tests--with-repo
+    (let* ((buffer (magit-status-setup-buffer default-directory))
+           (hunk (with-current-buffer buffer
+                   (magit-section-at
+                    (agent-shell-notes-tests--search "^\\+line 3 changed$")))))
+      (with-current-buffer buffer
+        (magit-section-hide hunk)
+        (should (oref hunk hidden))
+        (should (invisible-p (agent-shell-notes-tests--search "^-line 5$"))))
+      (let ((point (agent-shell-notes-tests--magit-capture
+                    buffer "^\\+line 3 changed$"))
+            (region (agent-shell-notes-tests--magit-capture
+                     buffer "^-line 3$" "^ line 4$")))
+        (should (equal '(:file "foo.txt" :side new :start 3 :end 3
+                         :type unstaged :rev nil :mixed nil)
+                       (agent-shell-notes-tests--location point)))
+        (should (equal '(:file "foo.txt" :side new :start 3 :end 4
+                         :type unstaged :rev nil :mixed t)
+                       (agent-shell-notes-tests--location region)))))))
+
+(defun agent-shell-notes-tests--magit-note (id project file &rest location)
+  "Return a `magit' note ID for FILE in PROJECT with LOCATION's keys.
+LOCATION also takes :quote and :text, which go to the note."
+  (let ((quote (plist-get location :quote))
+        (text (or (plist-get location :text) "")))
+    `((:id . ,id) (:source . magit) (:project . ,project)
+      (:location . (:file ,file ,@(map-into
+                                   (map-remove (lambda (k _)
+                                                 (memq k '(:quote :text)))
+                                               location)
+                                   'plist)))
+      (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+      (:created . nil))))
+
+(ert-deftest agent-shell-notes-magit-review-shows-range-and-tags ()
+  (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes--notes
+          (list (agent-shell-notes-tests--magit-note
+                 1 "/proj/a/" "src/foo.el" :side 'new :start 3 :end 4
+                 :type 'unstaged :quote "+x\n y")
+                (agent-shell-notes-tests--magit-note
+                 2 "/proj/a/" "src/foo.el" :side 'old :start 7 :end 7
+                 :type 'staged :quote "-z")
+                (agent-shell-notes-tests--magit-note
+                 3 "/proj/a/" "src/foo.el" :side 'old :start 9 :end 10
+                 :type 'committed :rev "HEAD~1" :quote "-a\n-b")))
+    (agent-shell-notes-review)
+    (with-current-buffer "*agent-shell-notes*"
+      (should (equal '(("/proj/a/src/foo.el" . "/proj/a/"))
+                     (agent-shell-notes-tests--runs
+                      'agent-shell-notes-group)))
+      (should (string-prefix-p "# src/foo.el — /proj/a\n" (buffer-string)))
+      (should (equal "**lines 3-4** `unstaged`"
+                     (agent-shell-notes-tests--field-text 1 'location)))
+      (should (equal "**line 7** `staged` `before changes`"
+                     (agent-shell-notes-tests--field-text 2 'location)))
+      (should (equal "**lines 9-10** `commit HEAD~1` `before changes`"
+                     (agent-shell-notes-tests--field-text 3 'location)))
+      (should (equal "+x\n y" (agent-shell-notes-tests--field-text 1 'quote)))
+      (should (eq 'agent-shell-notes-location
+                  (get-text-property (agent-shell-notes-tests--search
+                                      "\\*\\*lines 3-4")
+                                     'face)))
+      (should (eq 'agent-shell-notes-tag
+                  (get-text-property (agent-shell-notes-tests--search
+                                      "`unstaged`")
+                                     'face))))))
+
+(ert-deftest agent-shell-notes-render-claude-diff-notes ()
+  (should (equal (agent-shell-notes-tests--golden "claude-diff")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--magit-note
+                         1 "/proj/a/" "src/foo.el" :side 'new :start 3 :end 4
+                         :type 'unstaged :mixed nil :text "hoist it"
+                         :quote (concat "+(let ((cache (make-hash-table)))\n"
+                                        "   (puthash key value cache)")))
+                  "" "/proj/a/")))
+  (should (equal (agent-shell-notes-tests--golden "claude-diff-old-side")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--magit-note
+                         1 "/proj/a/" "src/foo.el" :side 'old :start 7 :end 8
+                         :type 'committed :rev "HEAD" :mixed nil
+                         :text "why removed" :quote "-(old-a)\n-(old-b)"))
+                  "" "/proj/a/")))
+  (should (equal (agent-shell-notes-tests--golden "claude-diff-mixed")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--magit-note
+                         1 "/proj/a/" "src/foo.el" :side 'new :start 3 :end 4
+                         :type 'staged :mixed t :text "check"
+                         :quote (concat "-(old)\n+(new)\n (ctx)\n"
+                                        "\\ No newline at end of file\n"
+                                        "-(gone)")))
+                  "" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-magit-region-to-end-of-buffer ()
+  (agent-shell-notes-tests--with-repo
+    (let ((buffer (magit-diff-setup-buffer nil nil nil '("foo.txt")
+                                           'unstaged)))
+      (agent-shell-notes-tests--magit-select buffer "^\\+new B$")
+      (push-mark (point) t t)
+      (goto-char (point-max))
+      (with-timeout (5 (ert-fail "capture hung"))
+        (agent-shell-notes-capture)
+        (with-current-buffer "*agent-shell-notes capture*"
+          (agent-shell-notes-capture-save)))
+      (let ((note (car (last agent-shell-notes--notes))))
+        (should (equal '(:file "foo.txt" :side new :start 26 :end 29
+                         :type unstaged :rev nil :mixed nil)
+                       (agent-shell-notes-tests--location note)))
+        (should (equal "+new B\n line 26\n line 27\n line 28"
+                       (alist-get :quote note)))))))
+
+(ert-deftest agent-shell-notes-magit-renamed-file-old-side-uses-old-path ()
+  (agent-shell-notes-tests--with-repo
+    (magit-git "mv" "bar.txt" "baz.txt")
+    (magit-git "add" "-A")
+    (let* ((buffer (magit-diff-setup-buffer nil "--cached" nil nil 'staged))
+           (old (agent-shell-notes-tests--magit-capture buffer "^-line 2$"))
+           (new (agent-shell-notes-tests--magit-capture
+                 buffer "^\\+line 2 changed$")))
+      (should (equal "bar.txt" (plist-get (alist-get :location old) :file)))
+      (should (equal "baz.txt" (plist-get (alist-get :location new) :file))))))
+
 ;;;; Transcript capture
 
 (defun agent-shell-notes-tests--transcript (name turns &optional session-id)

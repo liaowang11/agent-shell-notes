@@ -1,0 +1,6 @@
+In `src/foo.el` at lines 7-8 (before changes):
+```elisp
+(old-a)
+(old-b)
+```
+why removed

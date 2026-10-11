@@ -1,0 +1,6 @@
+In `src/foo.el` at lines 3-4:
+```elisp
+(let ((cache (make-hash-table)))
+  (puthash key value cache)
+```
+hoist it
