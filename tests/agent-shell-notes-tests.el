@@ -1495,6 +1495,455 @@ The boundary must be stubbed by the caller."
                              'agent-shell-notes-id)))
         (should-not agent-shell-notes--marks)))))
 
+;;;; Transcript capture
+
+(defun agent-shell-notes-tests--transcript (name turns &optional session-id)
+  "Return a fake shell buffer NAME holding TURNS, rendered for real.
+Each turn is (PROMPT FRAGMENT...): PROMPT is submitted as comint text
+with an end-of-prompt marker, then each FRAGMENT, a plist of
+`agent-shell--update-fragment' keys, is rendered with the turn's
+request count.  No process starts.  SESSION-ID defaults to \"sess-1\"."
+  (let ((buffer (generate-new-buffer name)))
+    (push buffer agent-shell-notes-tests--shells)
+    (with-current-buffer buffer
+      (setq default-directory "/tmp/")
+      (setq-local comint-prompt-regexp "Claude> ")
+      (setq-local shell-maker--config
+                  (make-shell-maker-config :name "agent" :prompt "Claude> "
+                                           :prompt-regexp "Claude> "))
+      (setq major-mode 'agent-shell-mode)
+      (setq-local comint-last-output-start (copy-marker (point-min)))
+      (setq-local agent-shell--state
+                  `((:buffer . ,buffer) (:request-count . 0)
+                    (:session . ((:id . ,(or session-id "sess-1"))))
+                    (:tool-calls . nil)))
+      (let ((agent-shell-persistent-prompt-enabled nil))
+        (dolist (turn turns)
+          (agent-shell-notes-tests--transcript-turn
+           (car turn) (cdr turn)))))
+    buffer))
+
+(defun agent-shell-notes-tests--transcript-turn (prompt fragments)
+  "Append a turn submitting PROMPT and rendering FRAGMENTS to this shell."
+  (let ((state agent-shell--state)
+        (agent-shell-persistent-prompt-enabled nil))
+    (setf (alist-get :request-count state)
+          (1+ (alist-get :request-count state)))
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (insert (propertize "Claude> " 'field 'output
+                          'font-lock-face '(agent-shell-prompt
+                                            comint-highlight-prompt))
+              prompt
+              (propertize "<shell-maker-end-of-prompt>"
+                          'shell-maker--marker t)
+              "\n\n"))
+    (cl-letf (((symbol-function 'agent-shell-viewport--buffer) #'ignore))
+      (dolist (fragment fragments)
+        ;; A tool call is known to the state by its id, as a live one is.
+        (when (plist-get fragment :tool)
+          (setf (alist-get (plist-get fragment :block-id)
+                           (alist-get :tool-calls state) nil nil #'equal)
+                '((:status . "completed")))
+          (setq fragment (map-delete (copy-sequence fragment) :tool)))
+        (apply #'agent-shell--update-fragment :state state fragment)))
+    (setq agent-shell--state state)))
+
+(defun agent-shell-notes-tests--two-turns (&optional name session-id)
+  "Return a fake shell with two turns: a tool call and a reply, then a reply."
+  (agent-shell-notes-tests--transcript
+   (or name "Claude Agent @ x")
+   '(("first prompt\nsecond line"
+      (:block-id "toolu_1" :tool t :label-left "[completed]"
+                 :label-right "Read foo.el" :body "file body line\n"
+                 :expanded t)
+      (:block-id "msg_A-agent_message_chunk" :body "Some **bold** reply.\n"))
+     ("second prompt"
+      (:block-id "msg_B-agent_message_chunk" :body "Second reply.\n")))
+   session-id))
+
+(defun agent-shell-notes-tests--pos (buffer text &optional end)
+  "Return the start of TEXT in BUFFER, or its end with END non-nil."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward text)
+      (if end (point) (match-beginning 0)))))
+
+(defun agent-shell-notes-tests--capture-at (buffer beg &optional end text)
+  "Capture in BUFFER with point at BEG, or a region BEG-END; save TEXT."
+  (switch-to-buffer buffer)
+  (transient-mark-mode 1)
+  (deactivate-mark)
+  (goto-char beg)
+  (when end
+    (push-mark (point) t t)
+    (goto-char end))
+  (agent-shell-notes-capture)
+  (with-current-buffer "*agent-shell-notes capture*"
+    (goto-char (point-max))
+    (insert (or text ""))
+    (agent-shell-notes-capture-save))
+  (car (last agent-shell-notes--notes)))
+
+(ert-deftest agent-shell-notes-transcript-capture-tool-body-in-shell ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--capture-at
+                  shell (agent-shell-notes-tests--pos shell "file body")
+                  nil "why read it")))
+      (should (eq 'transcript (alist-get :source note)))
+      (should (equal '(:session-id "sess-1" :shell "Claude Agent @ x"
+                                   :turn 1 :kind tool :prompt "first prompt"
+                                   :turn-end nil)
+                     (alist-get :location note)))
+      (should (equal "file body line" (alist-get :quote note)))
+      (should (equal "why read it" (alist-get :text note)))
+      (should (eq shell (car (alist-get :markers note)))))))
+
+(ert-deftest agent-shell-notes-transcript-capture-block-kinds ()
+  ;; The kind comes from the fragment's qualified id; the namespace (the
+  ;; request count) is never read as a turn.
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--transcript
+                  "Claude Agent @ kinds"
+                  '(("go"
+                     (:block-id "activity-1-agent_thought_chunk"
+                                :group-id "activity-1" :group-label "Thinking"
+                                :body "pondering deeply\n" :expanded t)
+                     (:block-id "plan" :label-left "Plan"
+                                :body "step one of plan\n" :expanded t)
+                     (:block-id "permission-toolu_9" :label-left "Allow?"
+                                :body "permit rm -rf\n" :expanded t)
+                     (:block-id "toolu_9-plan" :label-left "Proposed"
+                                :body "proposed plan text\n" :expanded t)
+                     (:block-id "starting" :body "chrome only\n"
+                                :expanded t)
+                     (:block-id "m-agent_message_chunk"
+                                :body "a reply line\n"))))))
+      (pcase-dolist (`(,text ,kind)
+                     '(("pondering" thought) ("Thinking" tool)
+                       ("step one" plan) ("permit rm" permission)
+                       ("proposed plan" plan) ("a reply" message)
+                       ("go" prompt) ("chrome only" message)))
+        (let ((note (agent-shell-notes-tests--capture-at
+                     shell (agent-shell-notes-tests--pos shell text))))
+          (should (equal (list text kind)
+                         (list text (plist-get (alist-get :location note)
+                                               :kind))))))
+      ;; A region over a thought and the reply is mixed.
+      (should (eq 'mixed
+                  (plist-get
+                   (alist-get :location
+                              (agent-shell-notes-tests--capture-at
+                               shell
+                               (agent-shell-notes-tests--pos shell "pondering")
+                               (agent-shell-notes-tests--pos shell "a reply"
+                                                             t)))
+                   :kind))))))
+
+(ert-deftest agent-shell-notes-transcript-capture-across-turns ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--capture-at
+                  shell (agent-shell-notes-tests--pos shell "Some")
+                  (agent-shell-notes-tests--pos shell "Second reply." t)))
+           (loc (alist-get :location note)))
+      (should (eq 'mixed (plist-get loc :kind)))
+      (should (eql 1 (plist-get loc :turn)))
+      (should (eql 2 (plist-get loc :turn-end)))
+      (should (equal "first prompt" (plist-get loc :prompt)))
+      ;; copy-as-markdown: the reply's Markdown, the prompt, the next reply.
+      (should (equal (concat "Some **bold** reply.\n\nClaude> second prompt"
+                             "\n\nSecond reply.")
+                     (alist-get :quote note))))))
+
+(ert-deftest agent-shell-notes-transcript-capture-prompts ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--two-turns)))
+      ;; A live prompt is comint text, not a fragment.
+      (let ((loc (alist-get :location
+                            (agent-shell-notes-tests--capture-at
+                             shell (agent-shell-notes-tests--pos
+                                    shell "second prompt")))))
+        (should (eq 'prompt (plist-get loc :kind)))
+        (should (eql 2 (plist-get loc :turn))))
+      ;; The second line of a multi-line prompt too.
+      (should (eq 'prompt
+                  (plist-get (alist-get :location
+                                        (agent-shell-notes-tests--capture-at
+                                         shell (agent-shell-notes-tests--pos
+                                                shell "second line")))
+                             :kind)))
+      ;; A tool call and a prompt: mixed.
+      (should (eq 'mixed
+                  (plist-get (alist-get :location
+                                        (agent-shell-notes-tests--capture-at
+                                         shell
+                                         (agent-shell-notes-tests--pos
+                                          shell "second line")
+                                         (agent-shell-notes-tests--pos
+                                          shell "file body" t)))
+                             :kind))))))
+
+(ert-deftest agent-shell-notes-transcript-capture-replayed-prompt ()
+  ;; A prompt replayed by session/load is a `-user_message_chunk' entry.
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--two-turns)))
+      (with-current-buffer shell
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (agent-shell-ui-update-text
+           :namespace-id "3" :block-id "user_message_chunk"
+           :text "replayed ask\n")))
+      (should (eq 'prompt
+                  (plist-get (alist-get :location
+                                        (agent-shell-notes-tests--capture-at
+                                         shell (agent-shell-notes-tests--pos
+                                                shell "replayed ask")))
+                             :kind))))))
+
+(ert-deftest agent-shell-notes-transcript-capture-while-streaming ()
+  ;; The turn in flight already has its prompt marker; capture works and
+  ;; the quote is a snapshot.
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--two-turns)))
+      (with-current-buffer shell
+        (agent-shell-notes-tests--transcript-turn
+         "third prompt"
+         '((:block-id "msg_C-agent_message_chunk" :body "partial ans"))))
+      (let ((note (agent-shell-notes-tests--capture-at
+                   shell (agent-shell-notes-tests--pos shell "partial"))))
+        (should (eql 3 (plist-get (alist-get :location note) :turn)))
+        (should (equal "third prompt"
+                       (plist-get (alist-get :location note) :prompt)))
+        (should (equal "partial ans" (alist-get :quote note)))
+        (with-current-buffer shell
+          (let ((agent-shell-persistent-prompt-enabled nil))
+            (cl-letf (((symbol-function 'agent-shell-viewport--buffer)
+                       #'ignore))
+              (agent-shell--update-fragment
+               :state agent-shell--state
+               :block-id "msg_C-agent_message_chunk" :body "wer" :append t))))
+        (should (agent-shell-notes-tests--pos shell "partial answer"))
+        (should (equal "partial ans" (alist-get :quote note)))))))
+
+(defun agent-shell-notes-tests--viewport (shell turn)
+  "Return SHELL's viewport showing TURN, filled the way paging fills it.
+The shell's point goes to the turn first, as `--show-page' does; only
+the header update is stubbed."
+  (let ((viewport (generate-new-buffer
+                   (concat (buffer-name shell) " [viewport]")))
+        (page (with-current-buffer shell
+                (goto-char (map-elt (agent-shell--turn-at-index turn)
+                                    :position))
+                (agent-shell--turn-at-index turn))))
+    (push viewport agent-shell-notes-tests--shells)
+    (with-current-buffer viewport
+      (agent-shell-viewport-view-mode)
+      (cl-letf (((symbol-function 'agent-shell-viewport--update-header)
+                 #'ignore))
+        (agent-shell-viewport--initialize
+         :prompt (map-elt page :prompt)
+         :response (map-elt page :response))))
+    viewport))
+
+(ert-deftest agent-shell-notes-transcript-capture-in-viewport ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (viewport (agent-shell-notes-tests--viewport shell 1)))
+      ;; §12 check 1, in batch: the page keeps the fragment properties.
+      (should (get-text-property
+               (agent-shell-notes-tests--pos viewport "file body")
+               'agent-shell-ui-state viewport))
+      ;; The user moves the shell's point; the page still shows turn 1.
+      (with-current-buffer shell (goto-char (point-max)))
+      (let* ((note (agent-shell-notes-tests--capture-at
+                    viewport (agent-shell-notes-tests--pos viewport "Some")
+                    nil "why bold"))
+             (loc (alist-get :location note)))
+        (should (equal '(:session-id "sess-1" :shell "Claude Agent @ x"
+                                     :turn 1 :kind message
+                                     :prompt "first prompt" :turn-end nil)
+                       loc))
+        (should (equal "Some **bold** reply." (alist-get :quote note)))
+        (should (eq viewport (car (alist-get :markers note)))))
+      ;; The echoed prompt on the page is a prompt.
+      (should (eq 'prompt
+                  (plist-get (alist-get :location
+                                        (agent-shell-notes-tests--capture-at
+                                         viewport
+                                         (agent-shell-notes-tests--pos
+                                          viewport "first prompt")))
+                             :kind))))))
+
+(ert-deftest agent-shell-notes-transcript-viewport-compose-is-not-a-transcript ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (viewport (agent-shell-notes-tests--viewport shell 1)))
+      (with-current-buffer viewport
+        (agent-shell-viewport-edit-mode)
+        (should-not (agent-shell-notes--transcript-shell))))))
+
+(defun agent-shell-notes-tests--headings ()
+  "Return the review's group headings, in order."
+  (let (headings (pos (point-min)))
+    (while (setq pos (text-property-not-all pos (point-max)
+                                            'agent-shell-notes-group nil))
+      (let ((end (next-single-property-change pos 'agent-shell-notes-group
+                                              nil (point-max))))
+        (push (buffer-substring-no-properties pos end) headings)
+        (setq pos end)))
+    (nreverse headings)))
+
+(ert-deftest agent-shell-notes-review-groups-transcript-notes ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--two-turns))
+          (other (agent-shell-notes-tests--two-turns "Claude Agent @ y"
+                                                     "sess-2")))
+      (agent-shell-notes-tests--capture-at                     ; id 1
+       shell (agent-shell-notes-tests--pos shell "Second reply") nil "r2")
+      (agent-shell-notes-tests--capture-at                     ; id 2
+       shell (agent-shell-notes-tests--pos shell "Some") nil "r1")
+      (agent-shell-notes-tests--capture-at                     ; id 3
+       other (agent-shell-notes-tests--pos other "Some") nil "y1")
+      (agent-shell-notes-tests--capture-at                     ; id 4
+       shell (agent-shell-notes-tests--pos shell "Some **") nil "r1 again")
+      (agent-shell-notes-tests--capture-at                     ; id 5
+       shell (agent-shell-notes-tests--pos shell "file body")
+       (agent-shell-notes-tests--pos shell "Second reply" t) "span")
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        ;; Session + turn + kind, by first capture; the turn is shown.
+        (should (equal '("# Claude Agent @ x — turn 2 — reply"
+                         "# Claude Agent @ x — turn 1 — reply"
+                         "# Claude Agent @ y — turn 1 — reply"
+                         "# Claude Agent @ x — turns 1-2 — mixed")
+                       (agent-shell-notes-tests--headings)))
+        (should (equal '(1 2 4 3 5) (agent-shell-notes-tests--runs
+                                     'agent-shell-notes-id)))
+        (should (equal "**reply**"
+                       (agent-shell-notes-tests--field-text 2 'location)))
+        (should (equal "> Some **bold** reply."
+                       (agent-shell-notes-tests--field-text 2 'quote)))
+        (should (equal "r1" (agent-shell-notes-tests--field-text 2 'text)))))))
+
+(defun agent-shell-notes-tests--transcript-note (id session quote text)
+  "Return a `transcript' note ID from SESSION with QUOTE and TEXT."
+  `((:id . ,id) (:source . transcript) (:project . "/proj/a/")
+    (:location . (:session-id ,session :shell ,(concat "Claude Agent @ "
+                                                        session)
+                              :turn 3 :kind message :prompt "the ask"
+                              :turn-end nil))
+    (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+    (:created . nil)))
+
+(ert-deftest agent-shell-notes-render-claude-reply-own-session ()
+  ;; DESIGN §8.1's worked example: the reply block goes first.
+  (should (equal (agent-shell-notes-tests--golden "claude-reply-own-session")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "src/foo.el" 42 43
+                         (concat "  (let ((cache (make-hash-table)))\n"
+                                 "    (puthash key value cache)")
+                         "the cache is created on every call; hoist it")
+                        (agent-shell-notes-tests--transcript-note
+                         2 "s1"
+                         "I removed the retry loop because it was never reached."
+                         (concat "it is reached when the socket closes early;"
+                                 " check `foo-connect`")))
+                  "fix both, then run make check" "/proj/a/" "s1"))))
+
+(ert-deftest agent-shell-notes-render-claude-reply-other-session ()
+  (let ((notes (list (agent-shell-notes-tests--transcript-note
+                      1 "s2" "The answer is 42." "why 42?"))))
+    (should (equal (agent-shell-notes-tests--golden
+                    "claude-reply-other-session")
+                   (agent-shell-notes--render notes "explain" "/proj/a/" "s1")))
+    ;; No target session (copy): a quote from another session too.
+    (should (equal (agent-shell-notes-tests--golden
+                    "claude-reply-other-session")
+                   (agent-shell-notes--render notes "explain" nil)))))
+
+(ert-deftest agent-shell-notes-render-claude-mixed-batch ()
+  ;; Reply blocks first and counted; the rest in review order.  An
+  ;; own-session note with no text is no reply block (as in Claude's
+  ;; serializer) and goes out as a plain quote.
+  (should (equal (agent-shell-notes-tests--golden "claude-mixed-batch")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "a.el" 1 1 "x" "fa")
+                        (agent-shell-notes-tests--transcript-note
+                         2 "s1" "own one\n\npara two" "c1")
+                        (agent-shell-notes-tests--transcript-note
+                         3 "s2" "other quote" "o1")
+                        (agent-shell-notes-tests--transcript-note
+                         4 "s1" "own quote only" "")
+                        (agent-shell-notes-tests--transcript-note
+                         5 "s1" "own two" "c2"))
+                  "req" "/proj/a/" "s1"))))
+
+(ert-deftest agent-shell-notes-render-claude-reply-escape-and-squeeze ()
+  (should (equal (agent-shell-notes-tests--golden "claude-reply-escape")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--transcript-note
+                         1 "s1" "quoted  \n\n  indented"
+                         (concat "\n line one\n<!-- reply 3 -->\n"
+                                 "keep <!-- reply 4 --> inline\n"
+                                 "<!-- reply -->\n\n\n\n\nafter gap  \n")))
+                  "" "/proj/a/" "s1"))))
+
+(ert-deftest agent-shell-notes-render-claude-reply-count-caps-at-99 ()
+  (let* ((notes (mapcar (lambda (i)
+                          (agent-shell-notes-tests--transcript-note
+                           i "s1" (format "q%d" i) (format "c%d" i)))
+                        (number-sequence 1 100)))
+         (text (agent-shell-notes--render notes "" "/proj/a/" "s1")))
+    (should (string-prefix-p "<!-- reply 99 -->\n> q1\n\nc1\n\n<!-- reply -->\n"
+                             text))
+    (should (= 98 (seq-count (lambda (line) (equal line "<!-- reply -->"))
+                             (split-string text "\n"))))
+    ;; The hundredth is past Claude's limit: a plain quote after the rest.
+    (should (string-suffix-p "c99\n\n\n> q100\n\nc100" text))))
+
+(ert-deftest agent-shell-notes-send-transcript-note-own-and-other-session ()
+  ;; "Own session" is decided at send from the target's session id; the
+  ;; turn index and the prompt are never sent.
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (other (agent-shell-notes-tests--shell "Claude Agent @ y" "/tmp/"
+                                                  "sess-2"))
+           ;; Keep the note for the second send.
+           (agent-shell-notes-after-send 'keep))
+      (agent-shell-notes-tests--capture-at
+       shell (agent-shell-notes-tests--pos shell "Some") nil "why bold")
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--with-boundary (list shell other)
+            (lambda (_) shell) #'ignore
+          (goto-char (1+ (agent-shell-notes-tests--note-pos 1)))
+          (agent-shell-notes-tests--key "C-c C-c")
+          (should (equal "<!-- reply 1 -->\n> Some **bold** reply.\n\nwhy bold"
+                         (nth 1 (car agent-shell-notes-tests--sent)))))
+        (agent-shell-notes-tests--with-boundary (list shell other)
+            (lambda (_) other) #'ignore
+          (goto-char (1+ (agent-shell-notes-tests--note-pos 1)))
+          (agent-shell-notes-tests--key "C-c C-c")
+          (should (equal "> Some **bold** reply.\n\nwhy bold"
+                         (nth 1 (car agent-shell-notes-tests--sent)))))))))
+
+(ert-deftest agent-shell-notes-transcript-capture-popup-header ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--two-turns)))
+      (switch-to-buffer shell)
+      (goto-char (agent-shell-notes-tests--pos shell "file body"))
+      (agent-shell-notes-capture)
+      (with-current-buffer "*agent-shell-notes capture*"
+        (should (equal "Claude Agent @ x — turn 1 — tool\n> file body line\n\n"
+                       (buffer-substring-no-properties
+                        (point-min) agent-shell-notes--text-start)))
+        (agent-shell-notes-capture-abort)))))
+
 ;;;; Compose
 
 (defmacro agent-shell-notes-tests--with-viewport (&rest body)

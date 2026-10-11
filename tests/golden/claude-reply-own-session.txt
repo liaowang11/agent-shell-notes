@@ -1,0 +1,15 @@
+<!-- reply 1 -->
+> I removed the retry loop because it was never reached.
+
+it is reached when the socket closes early; check `foo-connect`
+
+
+In `src/foo.el` at lines 42-43:
+```elisp
+  (let ((cache (make-hash-table)))
+    (puthash key value cache)
+```
+the cache is created on every call; hoist it
+
+
+fix both, then run make check

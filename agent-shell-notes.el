@@ -91,6 +91,122 @@ ending at the start of a line does not touch that line."
           :beg beg
           :end end)))
 
+;;;;; Transcript
+
+(defun agent-shell-notes--transcript-shell ()
+  "Return the shell buffer of the current transcript buffer, or nil.
+That is the buffer itself in a shell, or a viewport page's shell."
+  (cond ((derived-mode-p 'agent-shell-mode) (current-buffer))
+        ((derived-mode-p 'agent-shell-viewport-view-mode)
+         (agent-shell-viewport--shell-buffer))))
+
+(defun agent-shell-notes--fragment-kind (state tool-calls)
+  "Return the block kind of a fragment whose ui state is STATE.
+TOOL-CALLS is the shell's `:tool-calls' alist.  The qualified id is
+<namespace>-<block-id> and the namespace may contain `-', so block
+ids are matched at the end.  Return nil for chrome."
+  (let ((qid (or (map-elt state :qualified-id) "")))
+    (cond
+     ((string-suffix-p "-agent_message_chunk" qid) 'message)
+     ((string-match-p "-agent_thought_chunk\\(?:-[0-9]+\\)?\\'" qid) 'thought)
+     ((string-suffix-p "-user_message_chunk" qid) 'prompt)
+     ((string-suffix-p "-plan" qid) 'plan)
+     ((string-match-p "-permission-" qid) 'permission)
+     ;; An activity group heads the tool calls under it.
+     ((eq (map-elt state :kind) 'group) 'tool)
+     ((seq-find (lambda (id) (string-suffix-p (concat "-" id) qid))
+                (map-keys tool-calls))
+      'tool))))
+
+(defun agent-shell-notes--prompt-text-p (pos)
+  "Return non-nil when POS, outside any fragment, is a user prompt.
+A shell prompt runs from the prompt string to the end-of-prompt
+marker; a viewport page marks its echoed prompt."
+  (or (get-text-property pos 'agent-shell-viewport-prompt)
+      (get-text-property pos 'shell-maker--marker)
+      (memq 'comint-highlight-prompt
+            (ensure-list (get-text-property pos 'font-lock-face)))
+      (when-let* ((marker (text-property-any pos (point-max)
+                                             'shell-maker--marker t)))
+        ;; Inside the input when no prompt string starts between POS
+        ;; and the next marker; response text has the next turn's
+        ;; prompt in between, or no marker after it.
+        (let ((p pos) found)
+          (while (and (not found) (< p marker))
+            (setq found (memq 'comint-highlight-prompt
+                              (ensure-list (get-text-property
+                                            p 'font-lock-face)))
+                  p (next-single-property-change
+                     p 'font-lock-face nil marker)))
+          (not found)))))
+
+(defun agent-shell-notes--transcript-kind (beg end tool-calls)
+  "Return the block kind of the text from BEG to END.
+TOOL-CALLS is the shell's `:tool-calls' alist.  Text of several kinds
+is `mixed'; with none, `message'."
+  (let ((pos beg) kinds)
+    (while (< pos end)
+      (let ((next (min end
+                       (next-single-property-change
+                        pos 'agent-shell-ui-state nil end)
+                       (next-single-property-change
+                        pos 'font-lock-face nil end)
+                       (next-single-property-change
+                        pos 'shell-maker--marker nil end)
+                       (next-single-property-change
+                        pos 'agent-shell-viewport-prompt nil end))))
+        (unless (string-blank-p (buffer-substring-no-properties pos next))
+          (when-let* ((kind (if-let* ((state (get-text-property
+                                              pos 'agent-shell-ui-state)))
+                                (agent-shell-notes--fragment-kind
+                                 state tool-calls)
+                              (and (agent-shell-notes--prompt-text-p pos)
+                                   'prompt))))
+            (cl-pushnew kind kinds)))
+        (setq pos next)))
+    (cond ((null kinds) 'message)
+          ((cdr kinds) 'mixed)
+          (t (car kinds)))))
+
+(defun agent-shell-notes--transcript-turn (shell pos)
+  "Return the 1-based turn at POS of the current transcript buffer.
+SHELL is its shell.  A viewport page is one turn: the viewport's
+cached position, which every page change refreshes."
+  (map-elt (if (eq shell (current-buffer))
+               (save-excursion (goto-char pos) (agent-shell--turn-position))
+             (agent-shell-viewport--position))
+           :current))
+
+(defun agent-shell-notes--transcript-extract ()
+  "Extract a `transcript' note from a shell or viewport buffer.
+The extent is the region, else the current line; the quote is its
+Markdown as `agent-shell-copy-as-markdown' would give it."
+  (let* ((shell (agent-shell-notes--transcript-shell))
+         (region (use-region-p))
+         (beg (if region (region-beginning) (line-beginning-position)))
+         (end (if region (region-end) (line-end-position)))
+         (turn (agent-shell-notes--transcript-turn shell beg))
+         (turn-end (agent-shell-notes--transcript-turn shell end))
+         (prompt (when turn
+                   (with-current-buffer shell
+                     (map-elt (agent-shell--turn-at-index turn) :prompt)))))
+    (list :location
+          (list :session-id (agent-shell-session-id :shell-buffer shell)
+                :shell (buffer-name shell)
+                :turn turn
+                :kind (agent-shell-notes--transcript-kind
+                       beg end (map-elt (buffer-local-value
+                                         'agent-shell--state shell)
+                                        :tool-calls))
+                :prompt (when prompt
+                          (car (split-string (substring-no-properties prompt)
+                                             "\n")))
+                :turn-end (unless (eql turn turn-end) turn-end))
+          :quote (string-trim (agent-shell--buffer-markdown-substring beg end)
+                              "[\n]+" "[\n]+")
+          :beg beg
+          :end end)))
+
 (defun agent-shell-notes--dired-p ()
   "Return non-nil in a dired buffer."
   (derived-mode-p 'dired-mode))
@@ -133,7 +249,9 @@ files, else the file at point."
           :end end)))
 
 (defcustom agent-shell-notes-sources
-  '((dired agent-shell-notes--dired-p agent-shell-notes--dired-extract)
+  '((transcript agent-shell-notes--transcript-shell
+                agent-shell-notes--transcript-extract)
+    (dired agent-shell-notes--dired-p agent-shell-notes--dired-extract)
     (file buffer-file-name agent-shell-notes--file-extract)
     (buffer always agent-shell-notes--buffer-extract))
   "Source types tried in order by `agent-shell-notes-capture'.
@@ -303,6 +421,47 @@ note's `:file'."
       (setq lines (append lines (list text))))
     (string-join lines "\n")))
 
+(defun agent-shell-notes--claude-quote-block (note)
+  "Return the Claude block of transcript NOTE from another session.
+A `> ' quote, then the note text after a blank line."
+  (let ((text (alist-get :text note)))
+    (concat (agent-shell-notes--block-quote (alist-get :quote note))
+            (unless (string-empty-p text)
+              (concat "\n\n" text)))))
+
+(defun agent-shell-notes--claude-reply-text (text)
+  "Return note TEXT as the body of a Claude reply block.
+Trimmed; a line that is a reply marker is escaped as `&lt;'; runs of
+three or more newlines become two."
+  (replace-regexp-in-string
+   "\n\\{3,\\}" "\n\n"
+   (replace-regexp-in-string "^<!-- reply\\(?: [0-9]+\\)? -->$"
+                             (lambda (line) (concat "&lt;" (substring line 1)))
+                             (string-trim text) t t)
+   t t))
+
+(defun agent-shell-notes--claude-replies (notes)
+  "Return NOTES as Claude reply blocks, joined by a blank line.
+The first marker carries the number of blocks."
+  (let ((count (length notes))
+        (first t))
+    (mapconcat (lambda (note)
+                 (prog1
+                     (concat (if first
+                                 (format "<!-- reply %d -->" count)
+                               "<!-- reply -->")
+                             "\n"
+                             (agent-shell-notes--block-quote
+                              (alist-get :quote note))
+                             "\n\n"
+                             (agent-shell-notes--claude-reply-text
+                              (alist-get :text note)))
+                   (setq first nil)))
+               notes "\n\n")))
+
+(defconst agent-shell-notes--claude-max-replies 99
+  "Claude sends at most this many reply blocks.")
+
 (defun agent-shell-notes--claude-dired-block (note project)
   "Return the Claude block of dired NOTE for a target in PROJECT."
   (let ((text (alist-get :text note))
@@ -339,22 +498,39 @@ The buffer has no file to name a language, so the fence says `text'."
   "Return the Claude block of NOTE for a target in PROJECT."
   (pcase (alist-get :source note)
     ('file (agent-shell-notes--claude-file-block note project))
+    ('transcript (agent-shell-notes--claude-quote-block note))
     ('dired (agent-shell-notes--claude-dired-block note project))
     ;; `buffer', and any source added by the user.
     (_ (agent-shell-notes--claude-buffer-block note))))
 
-(defun agent-shell-notes--render (notes request project)
+(defun agent-shell-notes--render (notes request project &optional session-id)
   "Return NOTES and REQUEST rendered in `agent-shell-notes-style'.
 NOTES are in review order.  PROJECT is the target's project, or nil
 when there is no target; a note from another project gets an absolute
-path."
-  (let ((blocks (mapconcat (lambda (note)
-                             (agent-shell-notes--claude-block note project))
-                           notes "\n\n"))
-        (request (string-trim request)))
-    (cond ((string-empty-p request) blocks)
-          ((string-empty-p blocks) request)
-          (t (concat blocks "\n\n\n" request)))))
+path.  SESSION-ID is the target's session id: transcript notes from
+that session become reply blocks, placed first."
+  (let* ((replies (seq-take
+                   (seq-filter
+                    (lambda (note)
+                      (and session-id
+                           (eq (alist-get :source note) 'transcript)
+                           (equal session-id
+                                  (plist-get (alist-get :location note)
+                                             :session-id))
+                           (not (string-empty-p
+                                 (string-trim (alist-get :text note))))))
+                    notes)
+                   agent-shell-notes--claude-max-replies))
+         (rest (mapconcat
+                (lambda (note)
+                  (agent-shell-notes--claude-block note project))
+                (seq-remove (lambda (note) (memq note replies)) notes)
+                "\n\n")))
+    (string-join (seq-remove #'string-empty-p
+                             (list (agent-shell-notes--claude-replies replies)
+                                   rest
+                                   (string-trim request)))
+                 "\n\n\n")))
 
 ;;;; Quote folding
 
@@ -417,6 +593,60 @@ In the note area of the capture popup, do what TAB does in Markdown."
      (agent-shell-notes--text-start
       (call-interactively (lookup-key markdown-mode-map (kbd "TAB")))))))
 
+;;;; Locations and quotes
+
+(defun agent-shell-notes--kind-name (kind)
+  "Return the name the review shows for transcript block KIND."
+  (if (eq kind 'message) "reply" (symbol-name kind)))
+
+(defun agent-shell-notes--turn-string (location)
+  "Return \"turn N\" or \"turns N-M\" for transcript LOCATION, or nil."
+  (let ((turn (plist-get location :turn))
+        (turn-end (plist-get location :turn-end)))
+    (cond ((null turn) nil)
+          (turn-end (format "turns %d-%d" turn turn-end))
+          (t (format "turn %d" turn)))))
+
+(defun agent-shell-notes--location-string (note)
+  "Return the location line of NOTE for the capture popup."
+  (let ((loc (alist-get :location note)))
+    (pcase (alist-get :source note)
+      ('transcript
+       (string-join (delq nil (list (plist-get loc :shell)
+                                    (agent-shell-notes--turn-string loc)
+                                    (agent-shell-notes--kind-name
+                                     (plist-get loc :kind))))
+                    " — "))
+      ('file (concat (file-relative-name (plist-get loc :file)
+                                         (alist-get :project note))
+                     " " (agent-shell-notes--range-string loc)))
+      ('dired (agent-shell-notes--dired-names note))
+      ;; `buffer', and any source added by the user.
+      (_ (format "%s (%s) %s" (plist-get loc :buffer)
+                 (plist-get loc :mode)
+                 (agent-shell-notes--range-string loc))))))
+
+(defun agent-shell-notes--insert-quote (note &optional open)
+  "Insert NOTE's quote at point, folded unless OPEN, if it has one.
+A transcript quote is a `> ' block; any other quote is fenced."
+  (when-let* ((quote (alist-get :quote note)))
+    (if (eq (alist-get :source note) 'transcript)
+        (let ((beg (point)))
+          (insert (agent-shell-notes--block-quote quote))
+          (agent-shell-notes--fold-quote beg (point) open)
+          (insert "\n"))
+      (let ((fence (agent-shell-notes--fence quote)))
+        (insert fence "\n")
+        (let ((beg (point)))
+          (insert quote)
+          (agent-shell-notes--fold-quote beg (point) open))
+        (insert "\n" fence "\n")))))
+
+(defun agent-shell-notes--block-quote (text)
+  "Return TEXT with each line trimmed at the end and prefixed by `> '."
+  (mapconcat (lambda (line) (concat "> " (string-trim-right line)))
+             (split-string text "\n") "\n"))
+
 ;;;; Capture popup
 
 (defconst agent-shell-notes--capture-buffer-name
@@ -461,29 +691,13 @@ The location and quote at the top are read-only; the note goes below.
 
 (defun agent-shell-notes--capture-insert-header (note)
   "Insert NOTE's read-only location line and quote at point."
-  (let ((quote (alist-get :quote note))
-        (loc (alist-get :location note)))
-    (insert (propertize
-             (pcase (alist-get :source note)
-               ('file (concat (file-relative-name (plist-get loc :file)
-                                                  (alist-get :project note))
-                              " " (agent-shell-notes--range-string loc)))
-               ('dired (agent-shell-notes--dired-names note))
-               (_ (format "%s (%s) %s" (plist-get loc :buffer)
-                          (plist-get loc :mode)
-                          (agent-shell-notes--range-string loc))))
-             'face 'agent-shell-notes-location)
-            "\n")
-    (when quote
-      (let ((fence (agent-shell-notes--fence quote)))
-        (insert fence "\n")
-        (let ((beg (point)))
-          (insert quote)
-          (agent-shell-notes--fold-quote beg (point)))
-        (insert "\n" fence "\n")))
-    (insert "\n")
-    (add-text-properties (point-min) (point) '(read-only t front-sticky t))
-    (put-text-property (1- (point)) (point) 'rear-nonsticky '(read-only))))
+  (insert (propertize (agent-shell-notes--location-string note)
+                      'face 'agent-shell-notes-location)
+          "\n")
+  (agent-shell-notes--insert-quote note)
+  (insert "\n")
+  (add-text-properties (point-min) (point) '(read-only t front-sticky t))
+  (put-text-property (1- (point)) (point) 'rear-nonsticky '(read-only)))
 
 ;;;###autoload
 (defun agent-shell-notes-capture ()
@@ -670,6 +884,11 @@ An emptied text keeps the note, quote only."
   (pcase (alist-get :source note)
     ('file (cons (plist-get (alist-get :location note) :file)
                  (alist-get :project note)))
+    ('transcript (let ((loc (alist-get :location note)))
+                   (list 'transcript
+                         (or (plist-get loc :session-id) (plist-get loc :shell))
+                         (plist-get loc :turn) (plist-get loc :turn-end)
+                         (plist-get loc :kind))))
     ('dired (cons (plist-get (alist-get :location note) :directory)
                   (alist-get :project note)))
     ;; `buffer', and any source added by the user.
@@ -684,6 +903,8 @@ An emptied text keeps the note, quote only."
                       (plist-get (alist-get :location note) :file) project)
                      (abbreviate-file-name
                       (directory-file-name project)))))
+    ('transcript (concat "# " (agent-shell-notes--location-string note)))
+
     ('dired (let ((project (alist-get :project note)))
               (format "# %s — %s"
                       (file-relative-name
@@ -720,12 +941,14 @@ group by line."
   "Insert NOTE into the review at point."
   (let ((beg (point))
         (id (alist-get :id note))
-        (quote (alist-get :quote note))
         (text (alist-get :text note)))
     (agent-shell-notes--insert-field
      'location
      (propertize (concat (format "**%s**"
                                  (pcase (alist-get :source note)
+                                   ('transcript (agent-shell-notes--kind-name
+                                                 (plist-get (alist-get :location note)
+                                                            :kind)))
                                    ('dired (agent-shell-notes--dired-names
                                             note (plist-get
                                                   (alist-get :location note)
@@ -736,14 +959,8 @@ group by line."
                            (format " `sent to %s`" target)))
                  'face 'agent-shell-notes-location))
     (insert "\n")
-    (when quote
-      (let ((fence (agent-shell-notes--fence quote)))
-        (insert fence "\n")
-        (let ((qbeg (point)))
-          (insert quote)
-          (agent-shell-notes--fold-quote
-           qbeg (point) (memq id agent-shell-notes--unfolded)))
-        (insert "\n" fence "\n")))
+    (agent-shell-notes--insert-quote
+     note (memq id agent-shell-notes--unfolded))
     (cond
      (agent-shell-notes-edit-mode
       (let ((tbeg (point)))
@@ -1229,7 +1446,8 @@ prompt in the target's compose buffer instead, to edit before sending."
                                  :last agent-shell-notes--last-target)))
          (text (agent-shell-notes--render
                 notes (agent-shell-notes--request-text)
-                (funcall (plist-get client :project) session))))
+                (funcall (plist-get client :project) session)
+                (funcall (plist-get client :session-id) session))))
     ;; Compose selects the compose buffer's window; what follows still
     ;; acts on the review.
     (save-current-buffer

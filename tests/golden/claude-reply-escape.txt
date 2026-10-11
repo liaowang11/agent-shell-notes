@@ -1,0 +1,11 @@
+<!-- reply 1 -->
+> quoted
+> 
+>   indented
+
+line one
+&lt;!-- reply 3 -->
+keep <!-- reply 4 --> inline
+&lt;!-- reply -->
+
+after gap

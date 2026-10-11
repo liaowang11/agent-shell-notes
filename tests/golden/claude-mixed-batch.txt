@@ -1,0 +1,27 @@
+<!-- reply 2 -->
+> own one
+> 
+> para two
+
+c1
+
+<!-- reply -->
+> own two
+
+c2
+
+
+In `a.el` at line 1:
+```elisp
+x
+```
+fa
+
+> other quote
+
+o1
+
+> own quote only
+
+
+req
