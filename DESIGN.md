@@ -164,7 +164,9 @@ Capturing during a streaming turn is allowed.
   `agent-shell-notes-capture-mode` derived from `markdown-mode`. Shown with
   `pop-to-buffer` and `agent-shell-notes-capture-display-action` (default:
   `display-buffer-at-bottom`, `window-height` 0.3). Evil insert state when
-  evil is loaded (`evil-set-initial-state`, guarded by `featurep`).
+  evil is loaded (`evil-set-initial-state`, guarded by `featurep`). This
+  is the only evil integration: the review ships no evil bindings, and
+  evil users bind its commands in their own config.
 - Top: read-only location line and quote (quote folded after 6 lines, `TAB`
   unfolds). Below: the note area, point there. Header line shows the keys.
 - `C-c C-c` saves; an empty note is saved as a quote-only note. `C-c C-k`
@@ -558,7 +560,10 @@ Best effort, nothing stored beyond the markers:
    project (worktree version), go to `:start` (new side), flash the line
    range. Old-side and `committed` notes with a dead buffer: `user-error`.
 3. `dired`: `dired` the directory, move to the first file.
-4. `transcript` with a dead shell, or `buffer` with a dead buffer:
+4. `transcript` captured in a viewport whose viewport buffer is dead
+   while its shell lives: reopen the shell's viewport, show the note's
+   turn page, go to the quoted location and flash it.
+5. `transcript` with a dead shell, or `buffer` with a dead buffer:
    `user-error "Source buffer is gone"`.
 
 On a group heading, jump to the first note of the group. Flashing a moved

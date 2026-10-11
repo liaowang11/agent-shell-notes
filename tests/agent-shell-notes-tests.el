@@ -3080,6 +3080,177 @@ WHERE is `heading' for the heading of ID's group."
                                     (alist-get :id note))
                                    :type 'user-error))))))
 
+(defun agent-shell-notes-tests--viewport-note (shell turn text &optional quote)
+  "Capture TEXT on SHELL's viewport page TURN, then kill the viewport.
+QUOTE, when non-nil, replaces the note's quote.  Return the note."
+  (let* ((viewport (agent-shell-notes-tests--viewport shell turn))
+         (note (agent-shell-notes-tests--capture-at
+                viewport (agent-shell-notes-tests--pos viewport text))))
+    (when quote
+      (setf (alist-get :quote note) quote))
+    ;; The user moves on in the shell, then closes the viewport.
+    (with-current-buffer shell (goto-char (point-max)))
+    (kill-buffer viewport)
+    note))
+
+(defun agent-shell-notes-tests--viewport-page ()
+  "Return the current viewport's page index, as its header reads it."
+  (map-elt (agent-shell-viewport--position) :current))
+
+(ert-deftest agent-shell-notes-jump-transcript-reopens-a-dead-viewport ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--viewport-note shell 1 "Some")))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (equal (concat (buffer-name shell) " [viewport]")
+                       (buffer-name)))
+        (should (eq (current-buffer) (window-buffer (selected-window))))
+        (should (derived-mode-p 'agent-shell-viewport-view-mode))
+        (should (= 1 (agent-shell-notes-tests--viewport-page)))
+        (should (looking-at-p "Some \\*\\*bold\\*\\* reply\\.$"))
+        (should (equal (list (list (current-buffer) (point)
+                                   (line-end-position)))
+                       agent-shell-notes-tests--pulses))))))
+
+(ert-deftest agent-shell-notes-jump-transcript-dead-viewport-and-shell-signals ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--viewport-note shell 1 "Some")))
+      (kill-buffer shell)
+      (should (equal '(user-error "Source buffer is gone")
+                     (should-error (agent-shell-notes-tests--jump-from
+                                    (alist-get :id note))
+                                   :type 'user-error)))
+      (should-not (get-buffer "Claude Agent @ x [viewport]")))))
+
+(ert-deftest agent-shell-notes-jump-transcript-quote-with-rendered-markup ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell
+            ;; The fork renders a fragment's Markdown only when its
+            ;; post-insert step runs, which a non-nil
+            ;; `agent-shell-section-functions' (or a late prompt) gates.
+            (let ((agent-shell-section-functions (list #'ignore)))
+              (agent-shell-notes-tests--two-turns)))
+           (viewport (agent-shell-notes-tests--viewport shell 1)))
+      (should (agent-shell-notes-tests--pos viewport "Some bold reply."))
+      (let ((whole (agent-shell-notes-tests--capture-at
+                    viewport (agent-shell-notes-tests--pos viewport "Some")))
+            ;; A region from inside the bold span keeps its visible text.
+            (partial (agent-shell-notes-tests--capture-at
+                      viewport (agent-shell-notes-tests--pos viewport "old")
+                      (agent-shell-notes-tests--pos viewport "reply." t))))
+        (should (equal "Some **bold** reply." (alist-get :quote whole)))
+        (should (equal "old reply." (alist-get :quote partial)))
+        (kill-buffer viewport)
+        (agent-shell-notes-tests--recording-pulses
+          (agent-shell-notes-tests--jump-from (alist-get :id whole))
+          (should (= 1 (agent-shell-notes-tests--viewport-page)))
+          (should (looking-at-p "Some bold reply\\.$"))
+          (should (equal (list (list (current-buffer) (point)
+                                     (line-end-position)))
+                         agent-shell-notes-tests--pulses))
+          (kill-buffer (current-buffer))
+          (setq agent-shell-notes-tests--pulses nil)
+          (agent-shell-notes-tests--jump-from (alist-get :id partial))
+          (should (looking-at-p "old reply\\.$"))
+          (should (equal (list (list (current-buffer) (point)
+                                     (line-end-position)))
+                         agent-shell-notes-tests--pulses)))))))
+
+(ert-deftest agent-shell-notes-jump-transcript-finds-the-shell-by-session ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--viewport-note shell 1 "Some")))
+      ;; Renamed, same session: still the note's shell.
+      (with-current-buffer shell (rename-buffer "Claude Agent @ y"))
+      (agent-shell-notes-tests--jump-from (alist-get :id note))
+      (should (equal "Claude Agent @ y [viewport]" (buffer-name)))
+      (should (= 1 (agent-shell-notes-tests--viewport-page)))
+      (kill-buffer (current-buffer))
+      ;; The note's name, another session: gone.
+      (with-current-buffer shell
+        (rename-buffer "Claude Agent @ x")
+        (setf (alist-get :session agent-shell--state)
+              '((:id . "sess-other"))))
+      (should (equal '(user-error "Source buffer is gone")
+                     (should-error (agent-shell-notes-tests--jump-from
+                                    (alist-get :id note))
+                                   :type 'user-error)))
+      (should-not (get-buffer "Claude Agent @ x [viewport]")))))
+
+(ert-deftest agent-shell-notes-jump-transcript-missing-turn-shows-latest-page ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--viewport-note
+                  shell 1 "Some" "Second reply.")))
+      (dolist (turn '(9 nil))
+        (setf (plist-get (alist-get :location note) :turn) turn)
+        (agent-shell-notes-tests--recording-pulses
+          (agent-shell-notes-tests--jump-from (alist-get :id note))
+          (should (derived-mode-p 'agent-shell-viewport-view-mode))
+          (should (= 2 (agent-shell-notes-tests--viewport-page)))
+          (should (looking-at-p "Second reply\\.$"))
+          (should (= 1 (length agent-shell-notes-tests--pulses))))
+        (kill-buffer (current-buffer))))))
+
+(ert-deftest agent-shell-notes-jump-transcript-quote-not-on-the-page ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           ;; A synthesized heading never appears on the page: the first
+           ;; line found is the one jumped to.
+           (heading (agent-shell-notes-tests--viewport-note
+                     shell 1 "Some" "### [completed]\n\nfile body line\n"))
+           (absent (agent-shell-notes-tests--viewport-note
+                    shell 1 "Some" "nowhere on the page")))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id heading))
+        (should (= 1 (agent-shell-notes-tests--viewport-page)))
+        (should (looking-at-p "file body line$"))
+        (should (equal (list (list (current-buffer) (point)
+                                   (line-end-position)))
+                       agent-shell-notes-tests--pulses))
+        (kill-buffer (current-buffer))
+        (setq agent-shell-notes-tests--pulses nil)
+        (agent-shell-notes-tests--jump-from (alist-get :id absent))
+        (should (= 1 (agent-shell-notes-tests--viewport-page)))
+        (should (bobp))
+        (should-not agent-shell-notes-tests--pulses)))))
+
+(ert-deftest agent-shell-notes-jump-transcript-shell-lost-its-turns ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--viewport-note shell 2 "Second")))
+      ;; Turn 2 really goes: the latest page is turn 1.
+      (with-current-buffer shell
+        (let ((inhibit-read-only t))
+          (delete-region (agent-shell-notes-tests--pos shell "Claude> second")
+                         (point-max))))
+      (agent-shell-notes-tests--jump-from (alist-get :id note))
+      (should (= 1 (agent-shell-notes-tests--viewport-page)))
+      (should (bobp))
+      (kill-buffer (current-buffer))
+      ;; No turns at all: an empty page, no error.
+      (with-current-buffer shell
+        (let ((inhibit-read-only t))
+          (erase-buffer)))
+      (agent-shell-notes-tests--jump-from (alist-get :id note))
+      (should (derived-mode-p 'agent-shell-viewport-view-mode))
+      (should (= 0 (buffer-size))))))
+
+(ert-deftest agent-shell-notes-jump-transcript-parks-a-compose-draft ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--viewport-note shell 1 "Some")))
+      ;; A compose buffer opened since the viewport was closed.
+      (with-current-buffer (agent-shell-viewport--buffer :shell-buffer shell)
+        (insert "my draft"))
+      (agent-shell-notes-tests--jump-from (alist-get :id note))
+      (should (= 1 (agent-shell-notes-tests--viewport-page)))
+      (should (equal "my draft"
+                     (map-elt agent-shell-viewport--compose-snapshot
+                              :content))))))
+
 (ert-deftest agent-shell-notes-jump-fallback-live-and-dead ()
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--buffer

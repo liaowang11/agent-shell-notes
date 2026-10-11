@@ -1742,6 +1742,80 @@ group whose heading is at point."
           (setq end (line-end-position)))))
     (agent-shell-notes--jump-show buffer beg end)))
 
+(defun agent-shell-notes--jump-viewport (note shell)
+  "Reopen SHELL's viewport on NOTE's turn page and flash the quote.
+A turn the shell no longer has, or none, shows the latest page.  The
+markers died with the old viewport, so the quote is searched for
+with `agent-shell-notes--find-quote'; not found, point stays at the
+page start and nothing flashes.  A compose draft in a viewport opened since
+is parked, as paging parks it."
+  (let* ((turns (length (with-current-buffer shell (agent-shell--turns))))
+         (turn (plist-get (alist-get :location note) :turn))
+         (viewport (agent-shell-viewport--buffer :shell-buffer shell))
+         range)
+    (with-current-buffer viewport
+      ;; Paging erases the buffer; park a compose draft as
+      ;; `agent-shell-viewport-view-last' does.
+      (when (and (derived-mode-p 'agent-shell-viewport-edit-mode)
+                 (not (string-blank-p (buffer-string))))
+        (setq agent-shell-viewport--compose-snapshot
+              `((:content . ,(buffer-string)) (:location . ,(point)))))
+      (agent-shell-viewport-view-mode)
+      (if (zerop turns)
+          (agent-shell-viewport--initialize)
+        (agent-shell-viewport--show-page
+         (if (and turn (<= 1 turn turns)) turn turns)))
+      (setq range (agent-shell-notes--find-quote
+                   (alist-get :quote note))))
+    (if range
+        (agent-shell-notes--jump-show viewport (car range) (cdr range))
+      (pop-to-buffer viewport)
+      (goto-char (point-min)))))
+
+(defun agent-shell-notes--page-markdown ()
+  "Return the current buffer as Markdown, with a way back to positions.
+A list (MARKDOWN STARTS ENDS).  A rendered span stands for its
+`agent-shell-markdown-source', as `agent-shell-markdown-reconstruct'
+gives it for a whole page; STARTS and ENDS are vectors holding the
+buffer start and end of the text each MARKDOWN char came from."
+  (let ((pos (point-min)) parts starts ends)
+    (while (< pos (point-max))
+      (let* ((source (get-text-property pos 'agent-shell-markdown-source))
+             (next (next-single-property-change
+                    pos 'agent-shell-markdown-source nil (point-max)))
+             (text (or source (buffer-substring-no-properties pos next))))
+        (push text parts)
+        (dotimes (i (length text))
+          (push (if source pos (+ pos i)) starts)
+          (push (if source next (+ pos i 1)) ends))
+        (setq pos next)))
+    (list (apply #'concat (nreverse parts))
+          (vconcat (nreverse starts))
+          (vconcat (nreverse ends)))))
+
+(defun agent-shell-notes--find-quote (quote)
+  "Return (BEG . END) of QUOTE in the current buffer, or nil.
+QUOTE is Markdown, so it is looked for in the page's Markdown, then
+in its visible text (a quote that began inside a rendered span holds
+visible text); the whole QUOTE first, then each of its lines."
+  (let ((views (list (agent-shell-notes--page-markdown)
+                     (list (buffer-substring-no-properties
+                            (point-min) (point-max))))))
+    (seq-some
+     (lambda (needle)
+       (seq-some
+        (pcase-lambda (`(,text ,starts ,ends))
+          (when-let* ((beg (string-search needle text)))
+            (let ((last (+ beg (length needle) -1)))
+              (if starts
+                  (cons (aref starts beg) (aref ends last))
+                (cons (+ (point-min) beg) (+ (point-min) last 1))))))
+        views))
+     (seq-remove #'string-blank-p
+                 (cons (or quote "")
+                       (mapcar #'string-trim
+                               (split-string (or quote "") "\n")))))))
+
 (defun agent-shell-notes--jump-dead (note)
   "Show the source of NOTE, whose source buffer is gone."
   (let ((loc (alist-get :location note)))
@@ -1757,7 +1831,19 @@ group whose heading is at point."
       ('dired
        (pop-to-buffer (dired-noselect (plist-get loc :directory)))
        (dired-goto-file (car (plist-get loc :files))))
-      ;; `transcript', `buffer', and any source added by the user.
+      ;; A dead source with a live shell was a viewport: had the shell
+      ;; been the source, the live path would have shown it.  The shell
+      ;; is the one on the note's session, whatever its name now.
+      ('transcript
+       (if-let* ((session (plist-get loc :session-id))
+                 (shell (seq-find
+                         (lambda (shell)
+                           (equal session (agent-shell-session-id
+                                           :shell-buffer shell)))
+                         (agent-shell-buffers))))
+           (agent-shell-notes--jump-viewport note shell)
+         (user-error "Source buffer is gone")))
+      ;; `buffer', and any source added by the user.
       (_ (user-error "Source buffer is gone")))))
 
 (defun agent-shell-notes-jump (&optional event)
