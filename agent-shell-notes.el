@@ -1087,6 +1087,8 @@ Kept apart from the review buffer, which is redrawn from scratch.")
   "C-c C-r" #'agent-shell-notes-restore-last
   "C-c C-e" #'agent-shell-notes-edit-mode
   "C-x C-q" #'agent-shell-notes-edit-mode
+  "RET" #'agent-shell-notes-jump
+  "<mouse-1>" #'agent-shell-notes-jump
   "q" #'quit-window)
 
 (define-derived-mode agent-shell-notes-review-mode markdown-mode "Notes"
@@ -1535,6 +1537,86 @@ With no note marked, this marks them all."
           agent-shell-notes--unfolded (delq id agent-shell-notes--unfolded)
           agent-shell-notes--marks (delq id agent-shell-notes--marks))
     (agent-shell-notes--review-draw)))
+
+;;;; Jump
+
+(defun agent-shell-notes--jump-target ()
+  "Return the note whose source `agent-shell-notes-jump' shows, or nil.
+The note of the location line at point, or the first note of the
+group whose heading is at point."
+  (let ((bol (line-beginning-position)))
+    (when-let* ((id (cond
+                     ((eq 'location (get-text-property
+                                     bol 'agent-shell-notes-field))
+                      (get-text-property bol 'agent-shell-notes-id))
+                     ((get-text-property bol 'agent-shell-notes-group)
+                      (when-let* ((pos (next-single-property-change
+                                        bol 'agent-shell-notes-id)))
+                        (get-text-property pos 'agent-shell-notes-id))))))
+      (seq-find (lambda (note) (eql id (alist-get :id note)))
+                agent-shell-notes--notes))))
+
+(defun agent-shell-notes--jump-show (buffer beg end)
+  "Show BUFFER with point at BEG and flash BEG..END."
+  (pop-to-buffer buffer)
+  (goto-char beg)
+  (pulse-momentary-highlight-region beg end))
+
+(defun agent-shell-notes--jump-file (note)
+  "Visit the file of NOTE and flash its line range."
+  (let* ((loc (alist-get :location note))
+         (buffer (find-file-noselect (agent-shell-notes--note-file note)))
+         beg end)
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (forward-line (1- (plist-get loc :start)))
+          (setq beg (point))
+          (forward-line (- (plist-get loc :end) (plist-get loc :start)))
+          (setq end (line-end-position)))))
+    (agent-shell-notes--jump-show buffer beg end)))
+
+(defun agent-shell-notes--jump-dead (note)
+  "Show the source of NOTE, whose source buffer is gone."
+  (let ((loc (alist-get :location note)))
+    (pcase (alist-get :source note)
+      ('file (agent-shell-notes--jump-file note))
+      ('magit
+       (cond
+        ((eq 'old (plist-get loc :side))
+         (user-error "Source buffer is gone; the old side has no file"))
+        ((eq 'committed (plist-get loc :type))
+         (user-error "Source buffer is gone; the note is on a commit"))
+        (t (agent-shell-notes--jump-file note))))
+      ('dired
+       (pop-to-buffer (dired-noselect (plist-get loc :directory)))
+       (dired-goto-file (car (plist-get loc :files))))
+      ;; `transcript', `buffer', and any source added by the user.
+      (_ (user-error "Source buffer is gone")))))
+
+(defun agent-shell-notes-jump (&optional event)
+  "Show the source of the note at point and flash the quoted range.
+On a location line, the note's source; on a group heading, the
+source of the group's first note.  Bound to a mouse click, EVENT,
+first move point to the click; a click elsewhere only moves point."
+  (interactive (list last-nonmenu-event))
+  (let ((click (mouse-event-p event)))
+    (when click
+      (mouse-set-point event))
+    (when-let* ((note (or (agent-shell-notes--jump-target)
+                          (unless click
+                            (user-error "No note source at point")))))
+      (agent-shell-notes--jump-note note))))
+
+(defun agent-shell-notes--jump-note (note)
+  "Show the source of NOTE and flash its range."
+  (pcase-let ((`(,buffer ,beg ,end) (alist-get :markers note)))
+    (if (and (buffer-live-p buffer) (markerp beg)
+             (eq buffer (marker-buffer beg)))
+        (agent-shell-notes--jump-show buffer beg end)
+      (agent-shell-notes--jump-dead note))))
 
 ;;;; Send and copy
 

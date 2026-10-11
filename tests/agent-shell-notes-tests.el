@@ -2799,6 +2799,266 @@ Its `default-directory' is a temporary directory outside any project."
                "In buffer `*asn-help*` (help-mode) at line 2:"
                (agent-shell-notes--render agent-shell-notes--notes "" nil))))))
 
+;;;; Jump
+
+(defvar agent-shell-notes-tests--pulses nil
+  "Ranges flashed during the test, as (BUFFER BEG END), newest first.")
+
+(defmacro agent-shell-notes-tests--recording-pulses (&rest body)
+  "Run BODY recording every range flashed in `agent-shell-notes-tests--pulses'."
+  (declare (indent 0) (debug t))
+  `(let ((agent-shell-notes-tests--pulses nil))
+     (cl-letf (((symbol-function 'pulse-momentary-highlight-region)
+                (lambda (beg end &rest _)
+                  (push (list (current-buffer) (+ 0 beg) (+ 0 end))
+                        agent-shell-notes-tests--pulses))))
+       ,@body)))
+
+(defun agent-shell-notes-tests--jump-from (id &optional where)
+  "Press RET in the review on note ID's location line, or WHERE.
+WHERE is `heading' for the heading of ID's group."
+  (agent-shell-notes-review)
+  (set-buffer "*agent-shell-notes*")
+  (agent-shell-notes-tests--goto-note id)
+  (when (eq where 'heading)
+    (goto-char (previous-single-property-change
+                (point) 'agent-shell-notes-group))
+    (goto-char (previous-single-property-change
+                (point) 'agent-shell-notes-group nil (point-min))))
+  (agent-shell-notes-tests--key "RET"))
+
+(defun agent-shell-notes-tests--line-start (buffer line)
+  "Return the start of LINE in BUFFER."
+  (with-current-buffer buffer
+    (save-excursion
+      (agent-shell-notes-tests--goto-line line)
+      (point))))
+
+(defun agent-shell-notes-tests--line-end (buffer line)
+  "Return the end of LINE in BUFFER."
+  (with-current-buffer buffer
+    (save-excursion
+      (agent-shell-notes-tests--goto-line line)
+      (line-end-position))))
+
+(ert-deftest agent-shell-notes-jump-live-file-buffer ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--file
+                 (agent-shell-notes-tests--lines 5)))
+           (note (agent-shell-notes-tests--capture buf 2 4 "two")))
+      (with-current-buffer buf (goto-char (point-max)))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (eq buf (window-buffer (selected-window))))
+        (should (eq buf (current-buffer)))
+        (should (= (point) (agent-shell-notes-tests--line-start buf 2)))
+        (should (equal (list (list buf
+                                   (agent-shell-notes-tests--line-start buf 2)
+                                   (agent-shell-notes-tests--line-end buf 3)))
+                       agent-shell-notes-tests--pulses))))))
+
+(ert-deftest agent-shell-notes-jump-dead-file-buffer-visits-the-file ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--file
+                 (agent-shell-notes-tests--lines 5)))
+           (file (buffer-file-name buf))
+           (note (agent-shell-notes-tests--capture buf 3 5 "two")))
+      (kill-buffer buf)
+      (unwind-protect
+          (agent-shell-notes-tests--recording-pulses
+            (agent-shell-notes-tests--jump-from (alist-get :id note))
+            (let ((visited (get-file-buffer file)))
+              (should visited)
+              (should (eq visited (window-buffer (selected-window))))
+              (should (eq visited (current-buffer)))
+              (should (= (point)
+                         (agent-shell-notes-tests--line-start visited 3)))
+              (should (equal
+                       (list (list visited
+                                   (agent-shell-notes-tests--line-start
+                                    visited 3)
+                                   (agent-shell-notes-tests--line-end
+                                    visited 4)))
+                       agent-shell-notes-tests--pulses))))
+        (when (get-file-buffer file)
+          (kill-buffer (get-file-buffer file)))))))
+
+(ert-deftest agent-shell-notes-jump-magit-live-diff-buffer ()
+  (agent-shell-notes-tests--with-repo
+    (let* ((diff (agent-shell-notes-tests--unstaged))
+           (note (agent-shell-notes-tests--magit-capture
+                  diff "^\\+line 3 changed$")))
+      (with-current-buffer diff (goto-char (point-min)))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (eq diff (current-buffer)))
+        (should (looking-at-p "^\\+line 3 changed$"))
+        (should (equal (list (list diff (point) (line-end-position)))
+                       agent-shell-notes-tests--pulses))))))
+
+(ert-deftest agent-shell-notes-jump-magit-dead-buffer-visits-the-new-side ()
+  (agent-shell-notes-tests--with-repo
+    (let* ((diff (agent-shell-notes-tests--unstaged))
+           (note (agent-shell-notes-tests--magit-capture
+                  diff "^\\+new A$" "^\\+new B$")))
+      (should (equal '(25 26) (list (plist-get (alist-get :location note)
+                                               :start)
+                                    (plist-get (alist-get :location note)
+                                               :end))))
+      (kill-buffer diff)
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (equal (expand-file-name "foo.txt"
+                                         agent-shell-notes-tests--repo)
+                       (buffer-file-name)))
+        (should (looking-at-p "^new A$"))
+        (should (equal (list (list (current-buffer) (point)
+                                   (save-excursion (forward-line 1)
+                                                   (line-end-position))))
+                       agent-shell-notes-tests--pulses))))))
+
+(ert-deftest agent-shell-notes-jump-magit-dead-old-side-or-committed-signals ()
+  (agent-shell-notes-tests--with-repo
+    (let ((old (agent-shell-notes-tests--magit-capture
+                (agent-shell-notes-tests--unstaged) "^-line 5$")))
+      (should (eq 'old (plist-get (alist-get :location old) :side)))
+      (kill-buffer (car (alist-get :markers old)))
+      (should-error (agent-shell-notes-tests--jump-from (alist-get :id old))
+                    :type 'user-error)
+      (should (equal "*agent-shell-notes*" (buffer-name))))
+    ;; The jump left the review current; Git runs in the repo.
+    (set-buffer (get-buffer-create " *asn-repo*"))
+    (setq default-directory agent-shell-notes-tests--repo)
+    (magit-git "add" "foo.txt")
+    (magit-git "commit" "-m" "edit")
+    (let ((committed (agent-shell-notes-tests--magit-capture
+                      (magit-revision-setup-buffer "HEAD" nil nil)
+                      "^\\+new B$")))
+      (should (eq 'new (plist-get (alist-get :location committed) :side)))
+      (kill-buffer (car (alist-get :markers committed)))
+      (should-error (agent-shell-notes-tests--jump-from
+                     (alist-get :id committed))
+                    :type 'user-error)
+      (should (equal "*agent-shell-notes*" (buffer-name))))))
+
+(ert-deftest agent-shell-notes-jump-dired-live-and-dead ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
+           (dir (buffer-local-value 'default-directory buf))
+           (note (agent-shell-notes-tests--dired-capture
+                  buf (lambda ()
+                        (dired-mark-files-regexp "\\`[bc]\\.el\\'"))
+                  "b and c")))
+      (with-current-buffer buf (goto-char (point-min)))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (eq buf (current-buffer)))
+        (should (= (point) (marker-position
+                            (nth 1 (alist-get :markers note))))))
+      (kill-buffer buf)
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (push (current-buffer) agent-shell-notes-tests--shells)
+        (should (derived-mode-p 'dired-mode))
+        (should (equal dir default-directory))
+        (should (eq (current-buffer) (window-buffer (selected-window))))
+        (should (equal (expand-file-name "b.el" dir)
+                       (dired-get-filename nil t)))))))
+
+(ert-deftest agent-shell-notes-jump-transcript-live-and-dead ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((shell (agent-shell-notes-tests--two-turns))
+           (note (agent-shell-notes-tests--capture-at
+                  shell (agent-shell-notes-tests--pos shell "Second reply"))))
+      (with-current-buffer shell (goto-char (point-min)))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (eq shell (current-buffer)))
+        (should (looking-at-p "Second reply"))
+        (should (equal 1 (length agent-shell-notes-tests--pulses))))
+      (kill-buffer shell)
+      (should (equal '(user-error "Source buffer is gone")
+                     (should-error (agent-shell-notes-tests--jump-from
+                                    (alist-get :id note))
+                                   :type 'user-error))))))
+
+(ert-deftest agent-shell-notes-jump-fallback-live-and-dead ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--buffer
+                 "*asn-help*" #'help-mode (agent-shell-notes-tests--lines 5)))
+           (note (agent-shell-notes-tests--capture buf 2 4 "two lines")))
+      (with-current-buffer buf (goto-char (point-max)))
+      (agent-shell-notes-tests--recording-pulses
+        (agent-shell-notes-tests--jump-from (alist-get :id note))
+        (should (eq buf (current-buffer)))
+        (should (= (point) (agent-shell-notes-tests--line-start buf 2)))
+        (should (equal (list (list buf
+                                   (agent-shell-notes-tests--line-start buf 2)
+                                   (agent-shell-notes-tests--line-end buf 3)))
+                       agent-shell-notes-tests--pulses)))
+      (kill-buffer buf)
+      (should (equal '(user-error "Source buffer is gone")
+                     (should-error (agent-shell-notes-tests--jump-from
+                                    (alist-get :id note))
+                                   :type 'user-error))))))
+
+(ert-deftest agent-shell-notes-jump-from-group-heading-takes-first-note ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--file
+                 (agent-shell-notes-tests--lines 5)))
+           (later (agent-shell-notes-tests--capture buf 4 nil "four"))
+           (first (agent-shell-notes-tests--capture buf 2 nil "two")))
+      (with-current-buffer buf (goto-char (point-max)))
+      (agent-shell-notes-tests--recording-pulses
+        ;; The group's first note is the one on line 2, shown first.
+        (agent-shell-notes-tests--jump-from (alist-get :id later) 'heading)
+        (should (eq buf (current-buffer)))
+        (should (= (point) (agent-shell-notes-tests--line-start buf 2)))
+        (should (eql 2 (alist-get :id first)))))))
+
+(ert-deftest agent-shell-notes-jump-off-a-location-signals ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--file
+                 (agent-shell-notes-tests--lines 5)))
+           (note (agent-shell-notes-tests--capture buf 2 nil "the text")))
+      (agent-shell-notes-review)
+      (set-buffer "*agent-shell-notes*")
+      (agent-shell-notes-tests--goto-note (alist-get :id note))
+      (search-forward "the text")
+      (should (equal '(user-error "No note source at point")
+                     (should-error (agent-shell-notes-tests--key "RET")
+                                   :type 'user-error)))
+      (should (equal "*agent-shell-notes*" (buffer-name))))))
+
+(defun agent-shell-notes-tests--click (pos)
+  "Return a mouse-1 click on POS in the selected window.
+Built by hand: batch Emacs never redisplays, so `posn-at-point' fails."
+  (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))
+
+(ert-deftest agent-shell-notes-jump-mouse-1-clicks-a-location ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--file
+                 (agent-shell-notes-tests--lines 5)))
+           (note (agent-shell-notes-tests--capture buf 3 nil "three")))
+      (agent-shell-notes-review)
+      (set-buffer "*agent-shell-notes*")
+      (should (eq 'agent-shell-notes-jump
+                  (keymap-lookup agent-shell-notes-review-mode-map
+                                 "<mouse-1>")))
+      (let ((location (progn (agent-shell-notes-tests--goto-note
+                              (alist-get :id note))
+                             (point)))
+            (text (progn (search-forward "three") (match-beginning 0))))
+        ;; A click off a location only moves point.
+        (goto-char (point-max))
+        (agent-shell-notes-jump (agent-shell-notes-tests--click text))
+        (should (equal "*agent-shell-notes*" (buffer-name)))
+        (should (= text (point)))
+        (agent-shell-notes-tests--recording-pulses
+          (agent-shell-notes-jump (agent-shell-notes-tests--click location))
+          (should (eq buf (current-buffer)))
+          (should (= (point) (agent-shell-notes-tests--line-start buf 3))))))))
+
 ;;;; The omp style
 
 (defmacro agent-shell-notes-tests--omp (&rest body)
