@@ -451,6 +451,10 @@ on a text terminal); `background' gives the whole note the face
   :type '(choice (const :tag "Fringe (margin on a tty)" fringe)
                  (const :tag "Background" background)))
 
+(defface agent-shell-notes-archived
+  '((t :inherit shadow))
+  "Face of an archived note in the review.")
+
 (defface agent-shell-notes-mark
   '((t :inherit region))
   "Face of a marked note's indicator or background.")
@@ -471,9 +475,11 @@ Kept apart from the review buffer, which is redrawn from scratch.")
   "g" #'agent-shell-notes-redraw
   "k" #'agent-shell-notes-delete
   "D" #'agent-shell-notes-delete-marked
+  "x" #'agent-shell-notes-purge-archived
   "e" #'agent-shell-notes-edit
   "C-c C-c" #'agent-shell-notes-send
   "w" #'agent-shell-notes-copy
+  "C-c C-r" #'agent-shell-notes-restore-last
   "C-c C-e" #'agent-shell-notes-edit-mode
   "C-x C-q" #'agent-shell-notes-edit-mode
   "q" #'quit-window)
@@ -605,8 +611,10 @@ group by line."
         (text (alist-get :text note)))
     (agent-shell-notes--insert-field
      'location
-     (propertize (format "**%s**" (agent-shell-notes--range-string
-                                   (alist-get :location note)))
+     (propertize (concat (format "**%s**" (agent-shell-notes--range-string
+                                           (alist-get :location note)))
+                         (when-let* ((target (alist-get :archived note)))
+                           (format " `sent to %s`" target)))
                  'face 'agent-shell-notes-location))
     (insert "\n")
     (when quote
@@ -627,6 +635,11 @@ group by line."
       (agent-shell-notes--insert-field 'text text)
       (insert "\n")))
     (put-text-property beg (point) 'agent-shell-notes-id id)
+    (when (alist-get :archived note)
+      ;; An overlay, so font-lock does not wipe it.
+      (let ((ov (make-overlay beg (point) nil t)))
+        (overlay-put ov 'face 'agent-shell-notes-archived)
+        (overlay-put ov 'evaporate t)))
     (when (memq id agent-shell-notes--marks)
       (agent-shell-notes--show-mark id beg (point)))))
 
@@ -938,6 +951,21 @@ the prompt until the agent starts and still return normally."
      :prompt text
      :disposition agent-shell-notes-agent-shell-disposition)))
 
+(defun agent-shell-notes--agent-shell-compose (shell text)
+  "Append TEXT to SHELL's viewport compose buffer and switch there.
+The text goes after any draft, and the draft's queue/steer choice is
+kept: reading it back must not create a viewport, and
+`agent-shell-viewport--show-buffer' always writes the disposition."
+  (unless (buffer-live-p shell)
+    (user-error "The agent-shell session is gone"))
+  (let ((disposition
+         (when-let* ((viewport (agent-shell-viewport--buffer
+                                :shell-buffer shell :existing-only t)))
+           (buffer-local-value 'agent-shell-viewport--compose-disposition
+                               viewport))))
+    (agent-shell-viewport--show-buffer :append text :shell-buffer shell
+                                       :edit t :disposition disposition)))
+
 (defun agent-shell-notes--agent-shell-session-id (shell)
   "Return the ACP session id of SHELL."
   (agent-shell-session-id :shell-buffer shell))
@@ -950,6 +978,7 @@ the prompt until the agent starts and still return normally."
 (defconst agent-shell-notes-agent-shell-client
   (list :read-session #'agent-shell-notes--agent-shell-read-session
         :send #'agent-shell-notes--agent-shell-send
+        :compose #'agent-shell-notes--agent-shell-compose
         :name #'buffer-name
         :project #'agent-shell-notes--agent-shell-project
         :session-id #'agent-shell-notes--agent-shell-session-id
@@ -963,6 +992,8 @@ the prompt until the agent starts and still return normally."
                                     (:projects LIST :last SESSION)
   :send (SESSION TEXT)              send TEXT; returning normally
                                     means sent
+  :compose (SESSION TEXT)           optional; put TEXT in the session's
+                                    compose buffer for a final edit
   :name (SESSION) -> string         the session's name
   :project (SESSION) -> directory   the session's project
   :session-id (SESSION) -> string   the session's id
@@ -971,6 +1002,79 @@ the prompt until the agent starts and still return normally."
 
 (defvar agent-shell-notes--last-target nil
   "The session of the last successful send.")
+
+;;;; After send
+
+(defcustom agent-shell-notes-after-send 'remove
+  "What a send or compose does to the notes that went out.
+`remove' takes them off the list; `archive' keeps them in place,
+dimmed and tagged with the target's name; `keep' leaves them.  Marks
+and the request clear after every send in every mode."
+  :type '(choice (const :tag "Remove" remove)
+                 (const :tag "Archive" archive)
+                 (const :tag "Keep" keep)))
+
+(defun agent-shell-notes--set-request (text)
+  "Replace the request body of the review, if live, with TEXT."
+  (when-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name))
+              (start (buffer-local-value 'agent-shell-notes--request-start
+                                         buffer)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (save-excursion
+          (delete-region start (point-max))
+          (goto-char start)
+          (insert-and-inherit text))))))
+
+;;;###autoload
+(defun agent-shell-notes-set-after-send (mode)
+  "Set `agent-shell-notes-after-send' to MODE for this Emacs session."
+  (interactive
+   (list (intern (completing-read
+                  (format "After send (now %s): "
+                          agent-shell-notes-after-send)
+                  '("remove" "archive" "keep") nil t))))
+  (setq agent-shell-notes-after-send mode)
+  (message "After send: %s" mode))
+
+(defun agent-shell-notes--set-archived (note value)
+  "Set NOTE's `:archived' to VALUE, in place."
+  (if-let* ((cell (assq :archived note)))
+      (setcdr cell value)
+    (nconc note (list (cons :archived value)))))
+
+(defvar agent-shell-notes--last-send nil
+  "What `agent-shell-notes-restore-last' puts back, or nil.
+A plist: `:mode' the after-send mode applied, `:marks', `:request',
+and `:notes', a list of (NOTE INDEX ARCHIVED) with each sent note,
+its index in the note list and its `:archived' before the send.")
+
+(defun agent-shell-notes--after-send (notes session)
+  "Apply `agent-shell-notes-after-send' to NOTES, just sent to SESSION.
+Then clear the marks and the request and redraw the review.  Keep
+what `agent-shell-notes-restore-last' needs to undo this."
+  (setq agent-shell-notes--last-send
+        (list :mode agent-shell-notes-after-send
+              :marks agent-shell-notes--marks
+              :request (agent-shell-notes--request-text)
+              :notes (mapcar (lambda (note)
+                               (list note
+                                     (seq-position agent-shell-notes--notes
+                                                   note #'eq)
+                                     (alist-get :archived note)))
+                             notes)))
+  (pcase agent-shell-notes-after-send
+    ('remove
+     (setq agent-shell-notes--notes
+           (seq-remove (lambda (note) (memq note notes))
+                       agent-shell-notes--notes)))
+    ('archive
+     (let ((name (funcall (plist-get agent-shell-notes-client :name) session)))
+       (dolist (note notes)
+         (agent-shell-notes--set-archived note name)))))
+  (setq agent-shell-notes--marks nil)
+  (agent-shell-notes--set-request "")
+  (agent-shell-notes--review-refresh))
 
 (defun agent-shell-notes--selected-notes ()
   "Return the marked notes in review order, else the note at point.
@@ -987,13 +1091,16 @@ nothing to send."
                             notes))
         (user-error "No note at point"))))
 
-(defun agent-shell-notes-send ()
+(defun agent-shell-notes-send (&optional compose)
   "Send the marked notes, else the note at point, and the request.
 Pick a target session, render the notes in `agent-shell-notes-style'
-and send them as one prompt."
-  (interactive)
+and send them as one prompt.  With prefix argument COMPOSE, put the
+prompt in the target's compose buffer instead, to edit before sending."
+  (interactive "P")
   (let* ((notes (agent-shell-notes--selected-notes))
          (client agent-shell-notes-client)
+         (_ (when (and compose (not (plist-get client :compose)))
+              (user-error "Client %S cannot fill a compose buffer" client)))
          (session (funcall (plist-get client :read-session)
                            (list :projects
                                  (delete-dups
@@ -1004,9 +1111,13 @@ and send them as one prompt."
          (text (agent-shell-notes--render
                 notes (agent-shell-notes--request-text)
                 (funcall (plist-get client :project) session))))
-    (funcall (plist-get client :send) session text)
+    ;; Compose selects the compose buffer's window; what follows still
+    ;; acts on the review.
+    (save-current-buffer
+      (funcall (plist-get client (if compose :compose :send)) session text))
+    (agent-shell-notes--after-send notes session)
     (setq agent-shell-notes--last-target session)
-    (message "Sent %d notes to %s" (length notes)
+    (message "%s %d notes to %s" (if compose "Composed" "Sent") (length notes)
              (funcall (plist-get client :name) session))))
 
 (defun agent-shell-notes-copy ()
@@ -1035,6 +1146,52 @@ Paths are relative, as there is no target.  Nothing else changes."
             (seq-difference agent-shell-notes--unfolded ids)
             agent-shell-notes--marks nil)
       (agent-shell-notes--review-draw))))
+
+;;;###autoload
+(defun agent-shell-notes-restore-last ()
+  "Undo the review side of the last send or compose.
+Removed notes return to their places, archived notes get their old
+tags back, and the marks and request return.  Nothing is unsent."
+  (interactive)
+  (let ((last agent-shell-notes--last-send))
+    (unless last
+      (user-error "Nothing to restore"))
+    (pcase (plist-get last :mode)
+      ('remove
+       (let ((entries (sort (copy-sequence (plist-get last :notes))
+                            (lambda (a b) (< (nth 1 a) (nth 1 b))))))
+         (pcase-dolist (`(,note ,index ,_) entries)
+           (unless (memq note agent-shell-notes--notes)
+             (let ((index (min index (length agent-shell-notes--notes))))
+               (setq agent-shell-notes--notes
+                     (append (seq-take agent-shell-notes--notes index)
+                             (list note)
+                             (seq-drop agent-shell-notes--notes index))))))))
+      ('archive
+       (pcase-dolist (`(,note ,_ ,archived) (plist-get last :notes))
+         (agent-shell-notes--set-archived note archived))))
+    (setq agent-shell-notes--last-send nil
+          agent-shell-notes--marks (plist-get last :marks))
+    (agent-shell-notes--set-request (plist-get last :request))
+    (agent-shell-notes--review-refresh)
+    (message "Restored %d notes" (length (plist-get last :notes)))))
+
+(defun agent-shell-notes-purge-archived ()
+  "Delete every archived note, without confirmation."
+  (interactive)
+  (let ((ids (mapcar (lambda (note) (alist-get :id note))
+                     (seq-filter (lambda (note) (alist-get :archived note))
+                                 agent-shell-notes--notes))))
+    (setq agent-shell-notes--notes
+          (seq-remove (lambda (note) (memq (alist-get :id note) ids))
+                      agent-shell-notes--notes)
+          agent-shell-notes--unfolded
+          (seq-difference agent-shell-notes--unfolded ids)
+          agent-shell-notes--marks
+          (seq-difference agent-shell-notes--marks ids))
+    (agent-shell-notes--review-draw)
+    (message "Purged %d archived note%s" (length ids)
+             (if (= 1 (length ids)) "" "s"))))
 
 (defun agent-shell-notes-redraw ()
   "Redraw the review from the note list."

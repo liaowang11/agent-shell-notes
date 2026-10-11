@@ -37,12 +37,20 @@
          (agent-shell-notes--next-id 0)
          (agent-shell-notes--marks nil)
          (agent-shell-notes--last-target nil)
+         (agent-shell-notes--last-send nil)
+         (agent-shell-notes-after-send agent-shell-notes-after-send)
          (agent-shell-notes-tests--shells nil)
          (kill-ring nil))
      (unwind-protect
          (save-window-excursion
            (delete-other-windows)
            ,@body)
+       ;; Viewports go first, after the windows are restored, so their
+       ;; clean-up hook never looks for a shell to kill.
+       (dolist (shell agent-shell-notes-tests--shells)
+         (when-let* ((viewport (get-buffer
+                                (concat (buffer-name shell) " [viewport]"))))
+           (kill-buffer viewport)))
        (mapc #'kill-buffer agent-shell-notes-tests--shells)
        (dolist (name '("*agent-shell-notes*" "*agent-shell-notes capture*"))
          (when (get-buffer name)
@@ -1152,7 +1160,9 @@ IDS-AND-REQUEST is the request."
            (b (agent-shell-notes-tests--shell
                "B" (directory-file-name dir) "sb"))
            (c (agent-shell-notes-tests--shell "C" other "sc"))
-           (d (agent-shell-notes-tests--shell "D" dir "sd")))
+           (d (agent-shell-notes-tests--shell "D" dir "sd"))
+           ;; The same note goes twice.
+           (agent-shell-notes-after-send 'keep))
       (agent-shell-notes-tests--with-boundary (list a b c d)
           (lambda (buffers) (car (last buffers))) #'ignore
         (agent-shell-notes-tests--goto-note 1)
@@ -1235,8 +1245,221 @@ IDS-AND-REQUEST is the request."
       (should (equal "s1" (funcall (plist-get client :session-id) shell)))
       (should (equal "/tmp/" (funcall (plist-get client :project) shell)))
       (should (eql 0 (funcall (plist-get client :turn-count) shell)))
-      (dolist (slot '(:read-session :send))
+      (dolist (slot '(:read-session :send :compose))
         (should (functionp (plist-get client slot)))))))
+
+;;;; After send
+
+(defun agent-shell-notes-tests--ids ()
+  "Return the ids of the note list, in list order."
+  (mapcar (lambda (note) (alist-get :id note)) agent-shell-notes--notes))
+
+(defun agent-shell-notes-tests--send-marked (shell ids &optional request)
+  "Mark IDS in the review, type REQUEST, and send them to SHELL.
+The boundary must be stubbed by the caller."
+  (agent-shell-notes-tests--key "U")
+  (dolist (id ids)
+    (agent-shell-notes-tests--goto-note id)
+    (agent-shell-notes-tests--key "m"))
+  (when request
+    (goto-char (point-max))
+    (agent-shell-notes-tests--type request))
+  (agent-shell-notes-tests--goto-note (car ids))
+  (agent-shell-notes-tests--key "C-c C-c")
+  (should (eq shell (car (car agent-shell-notes-tests--sent)))))
+
+(ert-deftest agent-shell-notes-after-send-remove-clears-marks-and-request ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 4))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1")))
+      (should (eq 'remove agent-shell-notes-after-send))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(1 3) "fix both")
+        (should (equal '(2 4) (agent-shell-notes-tests--ids)))
+        (should (equal '(2 4) (agent-shell-notes-tests--runs
+                               'agent-shell-notes-id)))
+        (should-not agent-shell-notes--marks)
+        (should (equal "" (agent-shell-notes-tests--request)))))))
+
+;; Faces of the overlays over review note ID.
+(defun agent-shell-notes-tests--overlay-faces (id)
+  (let ((beg (agent-shell-notes-tests--note-pos id)))
+    (delq nil (mapcar (lambda (ov) (overlay-get ov 'face))
+                      (overlays-at (1+ beg))))))
+
+(defun agent-shell-notes-tests--archived (id)
+  (alist-get :archived (seq-find (lambda (note) (eql id (alist-get :id note)))
+                                 agent-shell-notes--notes)))
+
+(ert-deftest agent-shell-notes-after-send-archive-tags-and-dims ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (x (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
+           (y (agent-shell-notes-tests--shell "Claude Agent @ y" dir "s2"))
+           (target x))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "archive")))
+        (call-interactively #'agent-shell-notes-set-after-send))
+      (should (eq 'archive agent-shell-notes-after-send))
+      (agent-shell-notes-tests--with-boundary (list x y)
+          (lambda (_) target) #'ignore
+        (agent-shell-notes-tests--send-marked x '(1 3) "go")
+        (should (equal '(1 2 3) (agent-shell-notes-tests--ids)))
+        (should (equal '(1 2 3) (agent-shell-notes-tests--runs
+                                 'agent-shell-notes-id)))
+        (should (equal "Claude Agent @ x" (agent-shell-notes-tests--archived 1)))
+        (should-not (agent-shell-notes-tests--archived 2))
+        (should (equal "**line 1** `sent to Claude Agent @ x`"
+                       (agent-shell-notes-tests--field-text 1 'location)))
+        (should (equal "**line 2**"
+                       (agent-shell-notes-tests--field-text 2 'location)))
+        (should (memq 'agent-shell-notes-archived
+                      (agent-shell-notes-tests--overlay-faces 1)))
+        (should-not (memq 'agent-shell-notes-archived
+                          (agent-shell-notes-tests--overlay-faces 2)))
+        (should-not agent-shell-notes--marks)
+        (should (equal "" (agent-shell-notes-tests--request)))
+        ;; Resending an archived note updates its tag.
+        (setq target y)
+        (agent-shell-notes-tests--send-marked y '(1))
+        (should (equal "Claude Agent @ y" (agent-shell-notes-tests--archived 1)))
+        (should (equal "**line 1** `sent to Claude Agent @ y`"
+                       (agent-shell-notes-tests--field-text 1 'location)))
+        (should (equal "Claude Agent @ x"
+                       (agent-shell-notes-tests--archived 3)))))))
+
+(ert-deftest agent-shell-notes-after-send-keep-leaves-notes ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
+           (agent-shell-notes-after-send 'keep))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(2) "go")
+        (should (equal '(1 2) (agent-shell-notes-tests--ids)))
+        (should-not (agent-shell-notes-tests--archived 2))
+        (should-not agent-shell-notes--marks)
+        (should (equal "" (agent-shell-notes-tests--request)))))))
+
+(ert-deftest agent-shell-notes-x-purges-archived-without-asking ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
+           (agent-shell-notes-after-send 'archive))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(1 3)))
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "m")
+      (agent-shell-notes-tests--goto-note 2)
+      (agent-shell-notes-tests--key "m")
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (_) (error "Asked")))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (_) (error "Asked"))))
+        (agent-shell-notes-tests--key "x"))
+      (should (equal '(2) (agent-shell-notes-tests--ids)))
+      (should (equal '(2) (agent-shell-notes-tests--runs
+                           'agent-shell-notes-id)))
+      (should (equal '(2) agent-shell-notes--marks))
+      ;; Nothing archived: harmless.
+      (agent-shell-notes-tests--key "x")
+      (should (equal '(2) (agent-shell-notes-tests--ids))))))
+
+(defun agent-shell-notes-tests--sorted-marks ()
+  (sort (copy-sequence agent-shell-notes--marks) #'<))
+
+(ert-deftest agent-shell-notes-restore-last-after-remove ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 4))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1")))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(1 3) "fix both"))
+      (agent-shell-notes-tests--capture src 2 nil "five")
+      (set-buffer "*agent-shell-notes*")
+      (should (equal '(2 4 5) (agent-shell-notes-tests--ids)))
+      (agent-shell-notes-tests--key "C-c C-r")
+      ;; Back in their places; the later capture stays where it was.
+      (should (equal '(1 2 3 4 5) (agent-shell-notes-tests--ids)))
+      (should (equal '(1 2 5 3 4) (agent-shell-notes-tests--runs
+                                   'agent-shell-notes-id)))
+      (should (equal '(1 3) (agent-shell-notes-tests--sorted-marks)))
+      (should (equal '(1 3) (agent-shell-notes-tests--marked)))
+      (should (equal "fix both" (agent-shell-notes-tests--request)))
+      ;; One level only.
+      (should-error (agent-shell-notes-tests--key "C-c C-r")
+                    :type 'user-error)
+      (should (equal '(1 2 3 4 5) (agent-shell-notes-tests--ids))))))
+
+(ert-deftest agent-shell-notes-restore-last-after-archive ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (x (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
+           (y (agent-shell-notes-tests--shell "Claude Agent @ y" dir "s2"))
+           (target x)
+           (agent-shell-notes-after-send 'archive))
+      (agent-shell-notes-tests--with-boundary (list x y)
+          (lambda (_) target) #'ignore
+        (agent-shell-notes-tests--send-marked x '(1))
+        (setq target y)
+        (agent-shell-notes-tests--send-marked y '(1 2) "again"))
+      (should (equal "Claude Agent @ y" (agent-shell-notes-tests--archived 1)))
+      ;; Restore is a global command too.
+      (with-temp-buffer
+        (agent-shell-notes-restore-last))
+      (should (equal "Claude Agent @ x" (agent-shell-notes-tests--archived 1)))
+      (should-not (agent-shell-notes-tests--archived 2))
+      (should (equal '(1 2 3) (agent-shell-notes-tests--ids)))
+      (should (equal '(1 2) (agent-shell-notes-tests--sorted-marks)))
+      (should (equal "again" (agent-shell-notes-tests--request)))
+      (should (equal "**line 1** `sent to Claude Agent @ x`"
+                     (agent-shell-notes-tests--field-text 1 'location)))
+      (should (equal "**line 2**"
+                     (agent-shell-notes-tests--field-text 2 'location))))))
+
+(ert-deftest agent-shell-notes-restore-last-after-keep ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
+           (agent-shell-notes-after-send 'keep))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(2) "go"))
+      (agent-shell-notes-tests--key "C-c C-r")
+      (should (equal '(1 2) (agent-shell-notes-tests--ids)))
+      (should (equal '(2) agent-shell-notes--marks))
+      (should (equal "go" (agent-shell-notes-tests--request))))))
+
+(ert-deftest agent-shell-notes-failed-send-stores-nothing ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1")))
+      (should (equal "Nothing to restore"
+                     (cadr (should-error (agent-shell-notes-restore-last)
+                                         :type 'user-error))))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(1) "one"))
+      (agent-shell-notes-tests--goto-note 2)
+      (agent-shell-notes-tests--key "m")
+      (goto-char (point-max))
+      (agent-shell-notes-tests--type "two")
+      (let ((before (agent-shell-notes-tests--review-state)))
+        (agent-shell-notes-tests--with-boundary (list shell) #'car
+            (lambda () (error "Session gone"))
+          (should-error (agent-shell-notes-send)))
+        (should (equal before (agent-shell-notes-tests--review-state))))
+      ;; `w' stores nothing either.
+      (agent-shell-notes-tests--key "w")
+      ;; The store still holds the first send.
+      (agent-shell-notes-tests--key "C-c C-r")
+      (should (equal '(1 2 3) (agent-shell-notes-tests--ids)))
+      (should (equal '(1) agent-shell-notes--marks))
+      (should (equal "one" (agent-shell-notes-tests--request))))))
 
 (ert-deftest agent-shell-notes-delete-marked-after-confirming ()
   (agent-shell-notes-tests--with-clean-state
@@ -1271,6 +1494,132 @@ IDS-AND-REQUEST is the request."
         (should (equal '(2) (agent-shell-notes-tests--runs
                              'agent-shell-notes-id)))
         (should-not agent-shell-notes--marks)))))
+
+;;;; Compose
+
+(defmacro agent-shell-notes-tests--with-viewport (&rest body)
+  "Run BODY with the real viewport code, stubbing only what needs a live shell.
+The header and the turn position read a shell-maker shell."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'agent-shell-viewport--update-header) #'ignore)
+             ((symbol-function 'agent-shell-viewport--position) #'ignore))
+     ,@body))
+
+(defun agent-shell-notes-tests--compose ()
+  "Run `C-u C-c C-c' in the review."
+  (let ((current-prefix-arg '(4)))
+    (agent-shell-notes-tests--key "C-c C-c")))
+
+(ert-deftest agent-shell-notes-compose-appends-after-the-draft ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ c" dir "s1"))
+           (review (current-buffer)))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--with-viewport
+          ;; Bill's draft, to be steered in.
+          (let ((viewport (alist-get :buffer
+                                     (agent-shell-viewport--show-buffer
+                                      :append "my draft" :shell-buffer shell
+                                      :edit t :disposition 'steer))))
+            (select-window (display-buffer review))
+            (set-buffer review)
+            (agent-shell-notes-tests--goto-note 2)
+            (agent-shell-notes-tests--compose)
+            (should-not agent-shell-notes-tests--sent)
+            (should (eq viewport (window-buffer (selected-window))))
+            (with-current-buffer viewport
+              (should (equal (concat "my draft\n\n"
+                                     (agent-shell-notes-tests--expected dir 2))
+                             (string-trim (buffer-string))))
+              (should (eq 'steer agent-shell-viewport--compose-disposition)))
+            (should (eq shell agent-shell-notes--last-target))))))))
+
+(ert-deftest agent-shell-notes-compose-without-a-viewport ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ f" dir "s1"))
+           (agent-shell-notes-agent-shell-disposition 'queue))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--with-viewport
+          (agent-shell-notes-tests--goto-note 1)
+          (agent-shell-notes-tests--key "m")
+          (goto-char (point-max))
+          (agent-shell-notes-tests--type "go")
+          ;; From the request body, as `C-c C-c' sends from there.
+          (let ((current-prefix-arg '(4)))
+            (agent-shell-notes-tests--edit-key "C-c C-c"))
+          (should-not agent-shell-notes-tests--sent)
+          (let ((viewport (window-buffer (selected-window))))
+            (should (equal (concat (buffer-name shell) " [viewport]")
+                           (buffer-name viewport)))
+            (with-current-buffer viewport
+              (should (derived-mode-p 'agent-shell-viewport-edit-mode))
+              (should (equal (agent-shell-notes-tests--expected dir 1 "go")
+                             (string-trim (buffer-string))))
+              ;; Nothing to keep: the send disposition does not apply.
+              (should-not agent-shell-viewport--compose-disposition))))))))
+
+(ert-deftest agent-shell-notes-compose-needs-a-compose-client ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ n" dir "s1"))
+           (agent-shell-notes-client
+            (map-delete (copy-sequence agent-shell-notes-agent-shell-client)
+                        :compose)))
+      (should-not (plist-member agent-shell-notes-client :compose))
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "m")
+      (goto-char (point-max))
+      (agent-shell-notes-tests--type "go")
+      (agent-shell-notes-tests--goto-note 2)
+      (let ((before (agent-shell-notes-tests--review-state)))
+        (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+          (agent-shell-notes-tests--with-viewport
+            (let ((message (cadr (should-error
+                                  (agent-shell-notes-tests--compose)
+                                  :type 'user-error))))
+              (should (string-prefix-p "Client (:read-session " message))
+              (should (string-suffix-p " cannot fill a compose buffer"
+                                       message)))
+            (should-not agent-shell-notes-tests--picked)
+            (should-not agent-shell-notes-tests--sent)))
+        (should (equal before (agent-shell-notes-tests--review-state)))
+        (should-not agent-shell-notes--last-target)
+        (should-not (get-buffer (concat (buffer-name shell) " [viewport]")))))))
+
+(ert-deftest agent-shell-notes-compose-applies-after-send-and-restore ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ r" dir "s1"))
+           (review (current-buffer))
+           (agent-shell-notes-after-send 'archive))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--with-viewport
+          (agent-shell-notes-tests--goto-note 1)
+          (agent-shell-notes-tests--key "m")
+          (goto-char (point-max))
+          (agent-shell-notes-tests--type "go")
+          (agent-shell-notes-tests--goto-note 1)
+          (agent-shell-notes-tests--compose)
+          (should-not agent-shell-notes-tests--sent)
+          (should (equal "Claude Agent @ r"
+                         (agent-shell-notes-tests--archived 1)))
+          (should-not agent-shell-notes--marks)
+          (with-current-buffer review
+            (should (equal "" (agent-shell-notes-tests--request)))
+            (should (equal "**line 1** `sent to Claude Agent @ r`"
+                           (agent-shell-notes-tests--field-text 1 'location))))
+          ;; Restore from the compose buffer, as a global command.
+          (agent-shell-notes-restore-last)
+          (should-not (agent-shell-notes-tests--archived 1))
+          (should (equal '(1) agent-shell-notes--marks))
+          (with-current-buffer review
+            (should (equal "go" (agent-shell-notes-tests--request)))))))))
 
 (provide 'agent-shell-notes-tests)
 ;;; agent-shell-notes-tests.el ends here
