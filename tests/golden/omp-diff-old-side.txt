@@ -1,0 +1,13 @@
+## Code Review Annotations
+
+Use these annotations as review notes; they are not independently validated findings.
+### src/foo.el — old 7-8
+Path: `src/foo.el`
+
+Hunk: `@@ -5,4 +5,2 @@`
+
+```diff
+-(old-a)
+-(old-b)
+```
+why removed

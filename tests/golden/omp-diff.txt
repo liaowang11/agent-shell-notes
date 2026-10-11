@@ -1,0 +1,25 @@
+## Code Review Annotations
+
+Use these annotations as review notes; they are not independently validated findings.
+### src/foo.el — new 42-43
+Path: `src/foo.el`
+
+Hunk: `@@ -40,6 +40,7 @@ (defun foo`
+
+```diff
++  (let ((cache (make-hash-table)))
++    (puthash key value cache)
+```
+the cache is created on every call; hoist it
+### src/foo.el — new 50
+Path: `src/foo.el`
+
+Hunk: `@@ -48,3 +49,4 @@`
+Hunk: `@@ -60,2 +62,2 @@ (defun bar`
+
+```diff
++(setq x 1)
+```
+second
+
+fix it

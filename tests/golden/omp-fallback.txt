@@ -1,0 +1,11 @@
+# Feedback on *Help*
+## 1. Feedback on:
+```text
+Signature
+(foo ARG)
+```
+is ARG optional?
+
+# Feedback on *scratch*
+## 2. Feedback on:
+"(+ 1 2)"

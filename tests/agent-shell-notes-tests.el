@@ -2799,5 +2799,206 @@ Its `default-directory' is a temporary directory outside any project."
                "In buffer `*asn-help*` (help-mode) at line 2:"
                (agent-shell-notes--render agent-shell-notes--notes "" nil))))))
 
+;;;; The omp style
+
+(defmacro agent-shell-notes-tests--omp (&rest body)
+  "Run BODY with `agent-shell-notes-style' set to `omp'."
+  (declare (indent 0) (debug t))
+  `(let ((agent-shell-notes-style 'omp))
+     ,@body))
+
+(ert-deftest agent-shell-notes-render-omp-diff-notes ()
+  (agent-shell-notes-tests--omp
+    ;; Ranges and single lines, one Hunk: line per stored hunk, prefixes
+    ;; kept, trailing blanks trimmed, the request after one blank line.
+    (should (equal (agent-shell-notes-tests--golden "omp-diff")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--magit-note
+                           1 "/proj/a/" "src/foo.el" :side 'new :start 42
+                           :end 43 :type 'unstaged :mixed nil
+                           :hunks '("@@ -40,6 +40,7 @@ (defun foo\n (a)\n+(b)")
+                           :text "the cache is created on every call; hoist it"
+                           :quote (concat "+  (let ((cache (make-hash-table)))\n"
+                                          "+    (puthash key value cache)"))
+                          (agent-shell-notes-tests--magit-note
+                           2 "/proj/a/" "src/foo.el" :side 'new :start 50
+                           :end 50 :type 'committed :rev "HEAD" :mixed nil
+                           :hunks '("@@ -48,3 +49,4 @@\n+x"
+                                    "@@ -60,2 +62,2 @@ (defun bar\n-y\n+z")
+                           :text "second" :quote "+(setq x 1)  "))
+                    "fix it" "/proj/a/")))
+    (should (equal (agent-shell-notes-tests--golden "omp-diff-old-side")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--magit-note
+                           1 "/proj/a/" "src/foo.el" :side 'old :start 7 :end 8
+                           :type 'staged :mixed nil
+                           :hunks '("@@ -5,4 +5,2 @@\n-(old-a)\n-(old-b)")
+                           :text "why removed" :quote "-(old-a)\n-(old-b)"))
+                    "" "/proj/a/")))
+    ;; Mixed: new side, every selected line kept with its prefix; an
+    ;; empty note text ends the note at the fence.
+    (should (equal (agent-shell-notes-tests--golden "omp-diff-mixed")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--magit-note
+                           1 "/proj/a/" "src/foo.el" :side 'new :start 3 :end 4
+                           :type 'unstaged :mixed t
+                           :hunks '("@@ -1,4 +1,4 @@\n-(old)\n+(new)")
+                           :text ""
+                           :quote "-(old)\n+(new)\n (ctx)\n-(gone)"))
+                    "" "/proj/a/")))))
+
+(ert-deftest agent-shell-notes-render-omp-reply-own-session ()
+  (agent-shell-notes-tests--omp
+    (let ((notes (list (agent-shell-notes-tests--transcript-note
+                        1 "s1"
+                        "I removed the retry loop because it was never reached.  "
+                        (concat "it is reached when the socket closes early;"
+                                " check `foo-connect`"))
+                       (agent-shell-notes-tests--transcript-note
+                        2 "s1" "Use `foo()` here.\ntwo lines"
+                        "Wrong function; use bar()."))))
+      ;; The notes' turn (3) is the target's last: "your last reply".
+      (should (equal (agent-shell-notes-tests--golden "omp-reply-own-session")
+                     (agent-shell-notes--render notes "fix both" "/proj/a/"
+                                                "s1" 3)))
+      ;; A later turn exists: the message is named by its turn.
+      (should (string-prefix-p
+               "# Feedback on Assistant message 3\n## 1. Feedback on:\n"
+               (agent-shell-notes--render notes "" "/proj/a/" "s1" 4))))))
+
+(ert-deftest agent-shell-notes-render-omp-reply-other-session ()
+  (agent-shell-notes-tests--omp
+    (let ((notes (list (agent-shell-notes-tests--transcript-note
+                        1 "s2" "The answer is 42." "why 42?"))))
+      (should (equal (agent-shell-notes-tests--golden
+                      "omp-reply-other-session")
+                     (agent-shell-notes--render notes "explain" "/proj/a/"
+                                                "s1" 3)))
+      ;; No target session (copy): a quote from another session too.
+      (should (equal (agent-shell-notes-tests--golden
+                      "omp-reply-other-session")
+                     (agent-shell-notes--render notes "explain" nil))))))
+
+(ert-deftest agent-shell-notes-send-omp-reads-target-turn-count ()
+  ;; The send asks the client for the target's turns: turn 3 of 3 is
+  ;; the last reply.
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--omp
+      (let ((shell (agent-shell-notes-tests--shell
+                    "Claude Agent @ s1" "/proj/a/" "s1")))
+        (setq agent-shell-notes--notes
+              (list (agent-shell-notes-tests--transcript-note
+                     1 "s1" "the reply" "too vague")))
+        (agent-shell-notes-review)
+        (with-current-buffer "*agent-shell-notes*"
+          (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+            (cl-letf (((symbol-function 'agent-shell--turns)
+                       (lambda () '(t1 t2 t3))))
+              (agent-shell-notes-tests--goto-note 1)
+              (agent-shell-notes-tests--key "C-c C-c"))
+            (should (equal (concat "# Feedback on your last reply\n"
+                                   "## 1. Feedback on:\n"
+                                   "\"the reply\"\ntoo vague")
+                           (nth 1 (car agent-shell-notes-tests--sent))))))))))
+
+(ert-deftest agent-shell-notes-render-omp-file-notes ()
+  (agent-shell-notes-tests--omp
+    ;; Two notes on one file share its heading; numbers run on.
+    (should (equal (agent-shell-notes-tests--golden "omp-file")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--file-note
+                           1 "/proj/a/" "src/foo.el" 3 3
+                           "(let ((cache (make-hash-table)))" "hoist the cache")
+                          (agent-shell-notes-tests--file-note
+                           2 "/proj/a/" "src/foo.el" 10 11
+                           "  (puthash key value cache)  \n  cache)\t" "")
+                          (agent-shell-notes-tests--file-note
+                           3 "/proj/a/" "README.md" 1 1 "x" "here"))
+                    "\n fix both \n" "/proj/a/")))))
+
+(ert-deftest agent-shell-notes-render-omp-dired ()
+  (agent-shell-notes-tests--omp
+    (let ((notes (list (agent-shell-notes-tests--dired-note
+                        1 "/proj/a/" "src/" '("src/a.el" "src/b.el")
+                        "rename these")
+                       (agent-shell-notes-tests--dired-note
+                        2 "/proj/a/" "docs/" '("docs/x.md") ""))))
+      (should (equal (agent-shell-notes-tests--golden "omp-dired")
+                     (agent-shell-notes--render notes "" "/proj/a/")))
+      ;; Another project: absolute paths.
+      (should (string-prefix-p
+               "# Feedback on /proj/a/src/a.el, /proj/a/src/b.el\n"
+               (agent-shell-notes--render notes "" "/proj/b/"))))))
+
+(ert-deftest agent-shell-notes-render-omp-fallback ()
+  (agent-shell-notes-tests--omp
+    (should (equal (agent-shell-notes-tests--golden "omp-fallback")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--buffer-note
+                           1 "*Help*" 'help-mode 3 4
+                           "Signature  \n(foo ARG)" "is ARG optional?")
+                          (agent-shell-notes-tests--buffer-note
+                           2 "*scratch*" 'lisp-interaction-mode 1 1
+                           "(+ 1 2)" ""))
+                    "" "/proj/b/")))))
+
+(ert-deftest agent-shell-notes-render-omp-mixed-batch ()
+  ;; Review order, a heading per run of notes, numbers across headings,
+  ;; diff notes unnumbered, other-session quotes plain.
+  (agent-shell-notes-tests--omp
+    (should (equal (agent-shell-notes-tests--golden "omp-mixed-batch")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--file-note
+                           1 "/proj/a/" "a.el" 1 1 "x" "fa")
+                          (agent-shell-notes-tests--transcript-note
+                           2 "s1" "own one\n\npara two" "c1")
+                          (agent-shell-notes-tests--transcript-note
+                           3 "s2" "other quote" "o1")
+                          (agent-shell-notes-tests--transcript-note
+                           4 "s1" "own quote only" "")
+                          (agent-shell-notes-tests--magit-note
+                           5 "/proj/a/" "src/foo.el" :side 'new :start 3
+                           :end 3 :type 'unstaged :mixed nil
+                           :hunks '("@@ -1,1 +1,1 @@\n-x\n+y")
+                           :text "d" :quote "+y")
+                          (agent-shell-notes-tests--transcript-note
+                           6 "s1" "own two" "c2"))
+                    "req" "/proj/a/" "s1" 3)))))
+
+(ert-deftest agent-shell-notes-render-omp-cross-project ()
+  (agent-shell-notes-tests--omp
+    (let ((notes (list (agent-shell-notes-tests--magit-note
+                        1 "/proj/a/" "src/foo.el" :side 'new :start 3
+                        :end 3 :type 'unstaged :mixed nil
+                        :hunks '("@@ -1 +1 @@\n-x\n+y")
+                        :text "d" :quote "+y")
+                       (agent-shell-notes-tests--file-note
+                        2 "/proj/a/" "src/bar.el" 3 3 "x" "here"))))
+      (should (equal (agent-shell-notes-tests--golden "omp-cross-project")
+                     (agent-shell-notes--render notes "" "/proj/b/")))
+      ;; Same project, spelled without the slash, and no target: relative.
+      (dolist (project '("/proj/a" nil))
+        (should (string-match-p
+                 "^### src/foo\\.el — new 3\nPath: `src/foo\\.el`$"
+                 (agent-shell-notes--render notes "" project)))))))
+
+(ert-deftest agent-shell-notes-render-omp-request-only ()
+  (agent-shell-notes-tests--omp
+    (should (equal (agent-shell-notes-tests--golden "omp-request-only")
+                   (agent-shell-notes--render
+                    nil " fix both, then run make check\n" "/proj/a/")))))
+
+(ert-deftest agent-shell-notes-render-omp-numbers-restart-per-send ()
+  (agent-shell-notes-tests--omp
+    (agent-shell-notes--render
+     (list (agent-shell-notes-tests--file-note 1 "/proj/a/" "a.el" 1 1 "x" "1")
+           (agent-shell-notes-tests--file-note 2 "/proj/a/" "a.el" 2 2 "y" "2"))
+     "" "/proj/a/")
+    (should (equal (agent-shell-notes-tests--golden "omp-second-send")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--file-note
+                           3 "/proj/a/" "b.el" 5 5 "z" "3"))
+                    "" "/proj/a/")))))
+
 (provide 'agent-shell-notes-tests)
 ;;; agent-shell-notes-tests.el ends here

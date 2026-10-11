@@ -1,0 +1,41 @@
+# Feedback on a.el
+## 1. Feedback on:
+"x"
+fa
+
+# Feedback on your last reply
+## 2. Feedback on:
+```text
+own one
+
+para two
+```
+c1
+
+> other quote
+
+o1
+
+# Feedback on your last reply
+## 3. Feedback on:
+"own quote only"
+
+## Code Review Annotations
+
+Use these annotations as review notes; they are not independently validated findings.
+### src/foo.el — new 3
+Path: `src/foo.el`
+
+Hunk: `@@ -1,1 +1,1 @@`
+
+```diff
++y
+```
+d
+
+# Feedback on your last reply
+## 4. Feedback on:
+"own two"
+c2
+
+req

@@ -1,0 +1,12 @@
+# Feedback on your last reply
+## 1. Feedback on:
+"I removed the retry loop because it was never reached."
+it is reached when the socket closes early; check `foo-connect`
+## 2. Feedback on:
+```text
+Use `foo()` here.
+two lines
+```
+Wrong function; use bar().
+
+fix both

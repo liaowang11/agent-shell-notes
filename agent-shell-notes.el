@@ -475,7 +475,8 @@ Relative to DIR, default the note's project."
 
 (defcustom agent-shell-notes-style 'claude
   "The wire format a send renders notes in."
-  :type '(choice (const :tag "Claude desktop" claude)))
+  :type '(choice (const :tag "Claude desktop" claude)
+                 (const :tag "oh-my-pi /annotate" omp)))
 
 (defcustom agent-shell-notes-fence-languages
   '(("el" . "elisp") ("py" . "python") ("ts" . "typescript")
@@ -676,12 +677,22 @@ The buffer has no file to name a language, so the fence says `text'."
     ;; `buffer', and any source added by the user.
     (_ (agent-shell-notes--claude-buffer-block note))))
 
-(defun agent-shell-notes--render (notes request project &optional session-id)
+(defun agent-shell-notes--render (notes request project
+                                         &optional session-id turn-count)
   "Return NOTES and REQUEST rendered in `agent-shell-notes-style'.
 NOTES are in review order.  PROJECT is the target's project, or nil
 when there is no target; a note from another project gets an absolute
 path.  SESSION-ID is the target's session id: transcript notes from
-that session become reply blocks, placed first."
+that session are own-session notes (`claude' places them first as
+reply blocks).  TURN-COUNT is the target's number of turns."
+  (pcase agent-shell-notes-style
+    ('omp (agent-shell-notes--omp-render notes request project
+                                         session-id turn-count))
+    (_ (agent-shell-notes--claude-render notes request project session-id))))
+
+(defun agent-shell-notes--claude-render (notes request project session-id)
+  "Return NOTES and REQUEST in the `claude' style.
+See `agent-shell-notes--render' for the arguments."
   (let* ((replies (seq-take
                    (seq-filter
                     (lambda (note)
@@ -704,6 +715,111 @@ that session become reply blocks, placed first."
                                    rest
                                    (string-trim request)))
                  "\n\n\n")))
+
+;;;; The omp style
+
+(defconst agent-shell-notes--omp-diff-heading
+  (concat "## Code Review Annotations\n\n"
+          "Use these annotations as review notes; they are not"
+          " independently validated findings.")
+  "The heading omp's `/annotate code-review' paste mode opens with.")
+
+(defun agent-shell-notes--trim-lines (text)
+  "Return TEXT with trailing whitespace trimmed from every line."
+  (mapconcat #'string-trim-right (split-string text "\n") "\n"))
+
+(defun agent-shell-notes--omp-diff-note (note project)
+  "Return the omp block of `magit' NOTE for a target in PROJECT."
+  (let* ((loc (alist-get :location note))
+         (path (agent-shell-notes--note-path note project))
+         (start (plist-get loc :start))
+         (end (plist-get loc :end))
+         (quote (agent-shell-notes--trim-lines (alist-get :quote note)))
+         (fence (agent-shell-notes--fence quote))
+         (text (alist-get :text note)))
+    (string-join
+     (append
+      (list (format "### %s — %s %s" path (plist-get loc :side)
+                    (if (eql start end) start (format "%d-%d" start end)))
+            (format "Path: `%s`" path)
+            "")
+      (mapcar (lambda (hunk)
+                (format "Hunk: `%s`" (car (split-string hunk "\n"))))
+              (plist-get loc :hunks))
+      (list "" (concat fence "diff") quote fence)
+      (unless (string-empty-p text) (list text)))
+     "\n")))
+
+(defun agent-shell-notes--omp-item (number quote text)
+  "Return omp's numbered feedback item NUMBER on QUOTE with TEXT.
+QUOTE nil makes it general feedback.  A quote holding a newline or a
+backtick goes in a `text' fence, else inline in double quotes."
+  (let ((quote (and quote (agent-shell-notes--trim-lines quote))))
+    (string-join
+     (append
+      (if (not quote)
+          (list (format "## %d. General feedback" number))
+        (list (format "## %d. Feedback on:" number)
+              (if (string-match-p "[\n`]" quote)
+                  (let ((fence (agent-shell-notes--fence quote)))
+                    (concat fence "text\n" quote "\n" fence))
+                (format "\"%s\"" quote))))
+      (unless (string-empty-p text) (list text)))
+     "\n")))
+
+(defun agent-shell-notes--omp-note (note project session-id turn-count number)
+  "Return (HEADING NUMBERED BODY) for NOTE in the `omp' style.
+HEADING is nil for a note that opens none; NUMBERED is non-nil when
+BODY uses NUMBER.  See `agent-shell-notes--render' for the rest."
+  (let ((loc (alist-get :location note))
+        (quote (alist-get :quote note))
+        (text (alist-get :text note)))
+    (pcase (alist-get :source note)
+      ('magit (list agent-shell-notes--omp-diff-heading nil
+                    (agent-shell-notes--omp-diff-note note project)))
+      ((and 'transcript
+            (guard (and session-id
+                        (equal session-id (plist-get loc :session-id)))))
+       (let ((turn (plist-get loc :turn)))
+         (list (if (eql turn turn-count)
+                   "# Feedback on your last reply"
+                 (format "# Feedback on Assistant message %d" turn))
+               t (agent-shell-notes--omp-item number quote text))))
+      ('transcript (list nil nil
+                         (agent-shell-notes--claude-quote-block note)))
+      ('file (list (format "# Feedback on %s"
+                           (agent-shell-notes--note-path note project))
+                   t (agent-shell-notes--omp-item number quote text)))
+      ('dired (list (format "# Feedback on %s"
+                            (mapconcat (lambda (file)
+                                         (agent-shell-notes--note-path
+                                          note project file))
+                                       (plist-get loc :files) ", "))
+                    t (agent-shell-notes--omp-item number nil text)))
+      ;; `buffer', and any source added by the user.
+      (_ (list (format "# Feedback on %s" (plist-get loc :buffer))
+               t (agent-shell-notes--omp-item number quote text))))))
+
+(defun agent-shell-notes--omp-render (notes request project session-id
+                                            turn-count)
+  "Return NOTES and REQUEST in the `omp' style.
+Each note goes under its heading; consecutive notes with the same
+heading share it.  Item numbers run across the send.  See
+`agent-shell-notes--render' for the arguments."
+  (let ((number 1) sections heading)
+    (dolist (note notes)
+      (pcase-let ((`(,head ,numbered ,body)
+                   (agent-shell-notes--omp-note note project session-id
+                                                turn-count number)))
+        (when numbered (setq number (1+ number)))
+        (if (and head (equal head heading))
+            (setcar sections (concat (car sections) "\n" body))
+          (push (if head (concat head "\n" body) body) sections))
+        (setq heading head)))
+    (string-join (seq-remove #'string-empty-p
+                             (list (string-join (nreverse sections) "\n\n")
+                                   (string-trim request)))
+                 "\n\n")))
 
 ;;;; Quote folding
 
@@ -1655,7 +1771,8 @@ With COMPOSE, fill the session's compose buffer instead."
          (text (agent-shell-notes--render
                 notes (agent-shell-notes--request-text)
                 (funcall (plist-get client :project) session)
-                (funcall (plist-get client :session-id) session))))
+                (funcall (plist-get client :session-id) session)
+                (funcall (plist-get client :turn-count) session))))
     ;; Compose selects the compose buffer's window; what follows still
     ;; acts on the review.
     (save-current-buffer

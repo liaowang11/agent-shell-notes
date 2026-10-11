@@ -1,0 +1,17 @@
+## Code Review Annotations
+
+Use these annotations as review notes; they are not independently validated findings.
+### /proj/a/src/foo.el — new 3
+Path: `/proj/a/src/foo.el`
+
+Hunk: `@@ -1 +1 @@`
+
+```diff
++y
+```
+d
+
+# Feedback on /proj/a/src/bar.el
+## 1. Feedback on:
+"x"
+here

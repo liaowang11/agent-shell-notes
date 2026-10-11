@@ -1,0 +1,16 @@
+# Feedback on src/foo.el
+## 1. Feedback on:
+"(let ((cache (make-hash-table)))"
+hoist the cache
+## 2. Feedback on:
+```text
+  (puthash key value cache)
+  cache)
+```
+
+# Feedback on README.md
+## 3. Feedback on:
+"x"
+here
+
+fix both

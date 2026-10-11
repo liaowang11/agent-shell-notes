@@ -1,0 +1,14 @@
+## Code Review Annotations
+
+Use these annotations as review notes; they are not independently validated findings.
+### src/foo.el — new 3-4
+Path: `src/foo.el`
+
+Hunk: `@@ -1,4 +1,4 @@`
+
+```diff
+-(old)
++(new)
+ (ctx)
+-(gone)
+```
