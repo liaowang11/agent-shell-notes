@@ -35,14 +35,21 @@
   (declare (indent 0) (debug t))
   `(let ((agent-shell-notes--notes nil)
          (agent-shell-notes--next-id 0)
-         (agent-shell-notes--marks nil))
+         (agent-shell-notes--marks nil)
+         (agent-shell-notes--last-target nil)
+         (agent-shell-notes-tests--shells nil)
+         (kill-ring nil))
      (unwind-protect
          (save-window-excursion
            (delete-other-windows)
            ,@body)
+       (mapc #'kill-buffer agent-shell-notes-tests--shells)
        (dolist (name '("*agent-shell-notes*" "*agent-shell-notes capture*"))
          (when (get-buffer name)
            (kill-buffer name))))))
+
+(defvar agent-shell-notes-tests--shells nil
+  "Fake shell buffers made by the test running now.")
 
 (defun agent-shell-notes-tests--file (lines &optional name)
   "Visit a fresh temporary file holding LINES; return its buffer.
@@ -876,6 +883,360 @@ Note I is on line I, so the review order is 1 .. N."
                                'agent-shell-notes-id)))
         ;; A deleted note leaves no stale mark.
         (should-not agent-shell-notes--marks)))))
+
+;;;; The request
+
+(defun agent-shell-notes-tests--request-start ()
+  "Return the start of the request body in the review."
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "^# Request\n\n")
+    (point)))
+
+(defun agent-shell-notes-tests--request ()
+  "Return the request body of the review, without properties."
+  (buffer-substring-no-properties (agent-shell-notes-tests--request-start)
+                                  (point-max)))
+
+(ert-deftest agent-shell-notes-review-request-body-takes-typing ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 2)
+    (let ((start (agent-shell-notes-tests--request-start)))
+      ;; The request is the last section, after the notes.
+      (should (> start (agent-shell-notes-tests--note-pos 2)))
+      (should (equal "" (agent-shell-notes-tests--request)))
+      (goto-char start)
+      (should (eq 'self-insert-command (key-binding "m")))
+      (agent-shell-notes-tests--type "mn")
+      ;; The first typed character carries the request keymap on.
+      (should (eq 'self-insert-command (key-binding "m")))
+      (agent-shell-notes-tests--type "m")
+      (should (equal "mnm" (agent-shell-notes-tests--request)))
+      (should (equal '(1 2) (mapcar (lambda (note) (alist-get :id note))
+                                    agent-shell-notes--notes)))
+      (should-not agent-shell-notes--marks)
+      ;; Everything before the body stays read-only.
+      (should-not (agent-shell-notes-tests--writable-p (1- start)))
+      (should-not (agent-shell-notes-tests--writable-p
+                   (- start (length "# Request\n\n"))))
+      (should-not (agent-shell-notes-tests--writable-p (point-min)))
+      ;; On a note the letters are note commands.
+      (agent-shell-notes-tests--goto-note 1)
+      (should (eq 'agent-shell-notes-mark (key-binding "m"))))))
+
+(ert-deftest agent-shell-notes-review-request-survives-redraws ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--review-with 1)))
+      (goto-char (agent-shell-notes-tests--request-start))
+      (agent-shell-notes-tests--type "fix it")
+      (agent-shell-notes-tests--key "g")
+      (should (equal "fix it" (agent-shell-notes-tests--request)))
+      (agent-shell-notes-tests--capture buf 2 nil "two")
+      (set-buffer "*agent-shell-notes*")
+      (should (equal "fix it" (agent-shell-notes-tests--request)))
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "C-x C-q")
+      (should (equal "fix it" (agent-shell-notes-tests--request)))
+      ;; Still writable in edit mode.
+      (should (agent-shell-notes-tests--writable-p (point-max)))
+      (agent-shell-notes-tests--edit-key "C-c C-k")
+      (should (equal "fix it" (agent-shell-notes-tests--request)))
+      (goto-char (point-max))
+      (should (eq 'self-insert-command (key-binding "m"))))))
+
+;;;; Rendering
+
+(defconst agent-shell-notes-tests--golden-dir
+  (expand-file-name "golden/"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Directory of the golden render files.")
+
+(defun agent-shell-notes-tests--golden (name)
+  "Return golden file NAME's text without its final newline."
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name (concat name ".txt") agent-shell-notes-tests--golden-dir))
+    (string-remove-suffix "\n" (buffer-string))))
+
+(defun agent-shell-notes-tests--file-note (id project file start end quote text)
+  "Return a `file' note ID for FILE (relative to PROJECT), lines START-END."
+  `((:id . ,id) (:source . file) (:project . ,project)
+    (:location . (:file ,(concat project file) :start ,start :end ,end))
+    (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+    (:created . nil)))
+
+(ert-deftest agent-shell-notes-render-claude-file-notes ()
+  (should (equal (agent-shell-notes-tests--golden "claude-file")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "src/foo.el" 3 3
+                         "(let ((cache (make-hash-table)))" "hoist the cache")
+                        (agent-shell-notes-tests--file-note
+                         2 "/proj/a/" "src/foo.el" 10 11
+                         "  (puthash key value cache)  \n  cache)\t" ""))
+                  "\n fix both, then run make check \n\n"
+                  "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-claude-request-only ()
+  (should (equal (agent-shell-notes-tests--golden "claude-request-only")
+                 (agent-shell-notes--render
+                  nil "fix both, then run make check" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-claude-notes-only ()
+  (should (equal "In `foo.el` at line 3:\n```elisp\nx\n```\nhere"
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "foo.el" 3 3 "x" "here"))
+                  "  \n" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-claude-cross-project ()
+  (let ((notes (list (agent-shell-notes-tests--file-note
+                      1 "/proj/a/" "src/foo.el" 3 3 "x" "here"))))
+    (should (equal (agent-shell-notes-tests--golden "claude-cross-project")
+                   (agent-shell-notes--render notes "" "/proj/b/")))
+    ;; Same project, spelled without the slash: relative.
+    (should (string-prefix-p "In `src/foo.el`"
+                             (agent-shell-notes--render notes "" "/proj/a")))
+    ;; No target (copy): relative.
+    (should (string-prefix-p "In `src/foo.el`"
+                             (agent-shell-notes--render notes "" nil)))))
+
+(ert-deftest agent-shell-notes-render-claude-sanitizes-path-and-snippet ()
+  (should (equal (agent-shell-notes-tests--golden "claude-sanitize")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "src/we`ird\nname/@scope/a@b.zzz" 1 6
+                         (concat "In foo at line 3 bar\n"
+                                 "  Reply from x:\n"
+                                 "<!-- attach me\n"
+                                 "mail a@b.com\n"
+                                 "cc @bill\n"
+                                 "Inside at nothing")
+                         "odd path"))
+                  "" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-claude-fence-outgrows-backticks ()
+  (should (equal (agent-shell-notes-tests--golden "claude-fence")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--file-note
+                         1 "/proj/a/" "README.md" 1 3 "see\n````\nx" ""))
+                  "" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-fence-language ()
+  (let ((auto-mode-alist '(("\\.zig\\'" . zig-ts-mode)
+                           ("\\.mk\\'" . makefile-gmake-mode)
+                           ("\\.weird\\'" . (lambda () nil)))))
+    (should (equal "elisp" (agent-shell-notes--fence-language "/a/b.el")))
+    (should (equal "typescript" (agent-shell-notes--fence-language "/a/b.ts")))
+    (should (equal "zig" (agent-shell-notes--fence-language "/a/b.zig")))
+    (should (equal "makefile-gmake" (agent-shell-notes--fence-language "/a/b.mk")))
+    (should (equal "text" (agent-shell-notes--fence-language "/a/b.weird")))
+    (should (equal "text" (agent-shell-notes--fence-language "/a/Nofile")))))
+
+;;;; Send and copy
+
+(defun agent-shell-notes-tests--shell (name dir &optional session-id)
+  "Return a fake shell buffer NAME in DIR, with SESSION-ID if non-nil.
+Only the process boundary is stubbed, so a buffer with a state and a
+directory is all the client reads."
+  (let ((buffer (generate-new-buffer name)))
+    (with-current-buffer buffer
+      (setq default-directory dir)
+      (setq-local agent-shell--state
+                  (list (cons :session (list (cons :id session-id))))))
+    (push buffer agent-shell-notes-tests--shells)
+    buffer))
+
+(defvar agent-shell-notes-tests--picked nil
+  "The :buffers and :prompt of each picker call, newest first.")
+
+(defvar agent-shell-notes-tests--sent nil
+  "Each (BUFFER PROMPT DISPOSITION) the prompt-send stub got, newest first.")
+
+(defmacro agent-shell-notes-tests--with-boundary (shells pick send &rest body)
+  "Run BODY with the agent-shell process boundary stubbed.
+SHELLS is what `agent-shell-buffers' returns.  PICK is called with the
+picker's buffer list and returns the pick.  SEND is called after the
+prompt-send call is recorded, with no arguments."
+  (declare (indent 3) (debug t))
+  `(let ((agent-shell-notes-tests--picked nil)
+         (agent-shell-notes-tests--sent nil)
+         (shells-fn (lambda () ,shells))
+         (pick-fn ,pick)
+         (send-fn ,send))
+     (cl-letf (((symbol-function 'agent-shell-buffers) shells-fn)
+               ((symbol-function 'agent-shell--read-shell-buffer)
+                (cl-function
+                 (lambda (&key prompt buffers &allow-other-keys)
+                   (push (list buffers prompt) agent-shell-notes-tests--picked)
+                   (funcall pick-fn buffers))))
+               ((symbol-function 'agent-shell--prompt-send)
+                (cl-function
+                 (lambda (&key prompt disposition &allow-other-keys)
+                   (push (list (current-buffer) prompt disposition)
+                         agent-shell-notes-tests--sent)
+                   (funcall send-fn)))))
+       ,@body)))
+
+(defun agent-shell-notes-tests--expected (dir &rest ids-and-request)
+  "Return the claude text for one-line notes IDS of the review fixture.
+Note I is line I of sample.el with text nI.  A string in
+IDS-AND-REQUEST is the request."
+  (ignore dir)
+  (let ((request (seq-find #'stringp ids-and-request))
+        (blocks (mapconcat
+                 (lambda (i)
+                   (format "In `sample.el` at line %d:\n```elisp\nline %d\n```\nn%d"
+                           i i i))
+                 (seq-remove #'stringp ids-and-request) "\n\n")))
+    (if request (concat blocks "\n\n\n" request) blocks)))
+
+(defun agent-shell-notes-tests--review-state ()
+  "Return the notes, marks and request, to compare before and after."
+  (list (copy-tree agent-shell-notes--notes)
+        (copy-sequence agent-shell-notes--marks)
+        (agent-shell-notes--request-text)))
+
+(ert-deftest agent-shell-notes-send-marked-notes-and-request ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
+           (agent-shell-notes-agent-shell-disposition 'queue))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--goto-note 3)
+        (agent-shell-notes-tests--key "m")
+        (agent-shell-notes-tests--goto-note 1)
+        (agent-shell-notes-tests--key "m")
+        (goto-char (point-max))
+        (agent-shell-notes-tests--type "fix both")
+        ;; C-c C-c from the request body sends too.
+        (agent-shell-notes-tests--edit-key "C-c C-c")
+        (should (equal "Send notes to: "
+                       (nth 1 (car agent-shell-notes-tests--picked))))
+        (should (equal (list (list shell
+                                   (agent-shell-notes-tests--expected
+                                    dir 1 3 "fix both")
+                                   'queue))
+                       agent-shell-notes-tests--sent))))))
+
+(ert-deftest agent-shell-notes-send-note-at-point-without-marks ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1")))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (goto-char (1+ (agent-shell-notes-tests--note-pos 2)))
+        (agent-shell-notes-tests--key "C-c C-c")
+        (should (equal (agent-shell-notes-tests--expected dir 2)
+                       (nth 1 (car agent-shell-notes-tests--sent))))
+        ;; A mark left by a deleted note is ignored.
+        (setq agent-shell-notes--marks '(99 3))
+        (agent-shell-notes-tests--key "C-c C-c")
+        (should (equal (agent-shell-notes-tests--expected dir 3)
+                       (nth 1 (car agent-shell-notes-tests--sent))))
+        ;; No marks, point in the request: nothing to send.
+        (setq agent-shell-notes--marks nil)
+        (goto-char (point-max))
+        (should (equal "No note at point"
+                       (cadr (should-error (agent-shell-notes-send)
+                                           :type 'user-error))))
+        (should (= 2 (length agent-shell-notes-tests--sent)))))))
+
+(ert-deftest agent-shell-notes-send-picker-order ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 1))
+           (dir (buffer-local-value 'default-directory src))
+           (other (file-name-as-directory (make-temp-file "asn-other-" t)))
+           (a (agent-shell-notes-tests--shell "A" other "sa"))
+           (b (agent-shell-notes-tests--shell
+               "B" (directory-file-name dir) "sb"))
+           (c (agent-shell-notes-tests--shell "C" other "sc"))
+           (d (agent-shell-notes-tests--shell "D" dir "sd")))
+      (agent-shell-notes-tests--with-boundary (list a b c d)
+          (lambda (buffers) (car (last buffers))) #'ignore
+        (agent-shell-notes-tests--goto-note 1)
+        (agent-shell-notes-tests--key "C-c C-c")
+        ;; Matching projects first, then the rest, each most recent first.
+        (should (equal (list b d a c)
+                       (car (car agent-shell-notes-tests--picked))))
+        (should (eq c (car (car agent-shell-notes-tests--sent))))
+        ;; The last target leads next time.
+        (agent-shell-notes-tests--key "C-c C-c")
+        (should (equal (list c b d a)
+                       (car (car agent-shell-notes-tests--picked))))
+        ;; Another project's target gets absolute paths.
+        (should (string-prefix-p
+                 (format "In `%ssample.el`" dir)
+                 (nth 1 (car agent-shell-notes-tests--sent))))))))
+
+(ert-deftest agent-shell-notes-send-refusals-leave-the-review ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (starting (agent-shell-notes-tests--shell "Starting" dir nil))
+           (live (agent-shell-notes-tests--shell "Live" dir "s1")))
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "m")
+      (goto-char (point-max))
+      (agent-shell-notes-tests--type "go")
+      (let ((before (agent-shell-notes-tests--review-state)))
+        ;; No live shell: refused before the picker.
+        (agent-shell-notes-tests--with-boundary nil #'car #'ignore
+          (should (equal "No agent-shell session"
+                         (cadr (should-error (agent-shell-notes-send)
+                                             :type 'user-error))))
+          (should-not agent-shell-notes-tests--picked))
+        ;; A shell whose agent has not started: refused before sending.
+        (agent-shell-notes-tests--with-boundary (list starting) #'car #'ignore
+          (should-error (agent-shell-notes-send) :type 'user-error)
+          (should-not agent-shell-notes-tests--sent))
+        ;; The send seam fails: the error goes up, nothing changes.
+        (agent-shell-notes-tests--with-boundary (list live) #'car
+            (lambda () (user-error "This agent does not support steering"))
+          (should (equal "This agent does not support steering"
+                         (cadr (should-error (agent-shell-notes-send)
+                                             :type 'user-error))))
+          (should (= 1 (length agent-shell-notes-tests--sent))))
+        (should (equal before (agent-shell-notes-tests--review-state)))
+        (should-not agent-shell-notes--last-target)))))
+
+(ert-deftest agent-shell-notes-copy-changes-nothing ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src)))
+      (agent-shell-notes-tests--goto-note 2)
+      (agent-shell-notes-tests--key "m")
+      (agent-shell-notes-tests--key "m")
+      (goto-char (point-max))
+      (agent-shell-notes-tests--type "go")
+      (let ((before (agent-shell-notes-tests--review-state)))
+        (agent-shell-notes-tests--with-boundary nil #'car #'ignore
+          (agent-shell-notes-tests--goto-note 1)
+          ;; Batch has no echo area; `message' returns what it shows.
+          (should (equal "Copied 2 notes"
+                         (agent-shell-notes-tests--key "w")))
+          (should (equal (agent-shell-notes-tests--expected dir 2 3 "go")
+                         (car kill-ring)))
+          (should-not agent-shell-notes-tests--picked)
+          (should-not agent-shell-notes-tests--sent))
+        (should (equal before (agent-shell-notes-tests--review-state)))
+        ;; In the request body `w' types.
+        (goto-char (point-max))
+        (should (eq 'self-insert-command (key-binding "w")))))))
+
+(ert-deftest agent-shell-notes-agent-shell-client-slots ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((shell (agent-shell-notes-tests--shell "Claude Agent @ x" "/tmp/" "s1"))
+          (client agent-shell-notes-agent-shell-client))
+      (should (eq client agent-shell-notes-client))
+      (should (equal "Claude Agent @ x"
+                     (funcall (plist-get client :name) shell)))
+      (should (equal "s1" (funcall (plist-get client :session-id) shell)))
+      (should (equal "/tmp/" (funcall (plist-get client :project) shell)))
+      (should (eql 0 (funcall (plist-get client :turn-count) shell)))
+      (dolist (slot '(:read-session :send))
+        (should (functionp (plist-get client slot)))))))
 
 (ert-deftest agent-shell-notes-delete-marked-after-confirming ()
   (agent-shell-notes-tests--with-clean-state

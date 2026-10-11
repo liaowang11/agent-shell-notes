@@ -144,6 +144,122 @@ SYMBOL becomes the note's `:source'."
             start (match-end 0)))
     (make-string (1+ longest) ?`)))
 
+;;;; Rendering
+
+(defcustom agent-shell-notes-style 'claude
+  "The wire format a send renders notes in."
+  :type '(choice (const :tag "Claude desktop" claude)))
+
+(defcustom agent-shell-notes-fence-languages
+  '(("el" . "elisp") ("py" . "python") ("ts" . "typescript")
+    ("tsx" . "tsx") ("js" . "javascript") ("jsx" . "jsx")
+    ("md" . "markdown") ("org" . "org") ("sh" . "bash") ("bash" . "bash")
+    ("zsh" . "zsh") ("rb" . "ruby") ("rs" . "rust") ("go" . "go")
+    ("c" . "c") ("h" . "c") ("cc" . "cpp") ("cpp" . "cpp") ("hpp" . "cpp")
+    ("java" . "java") ("kt" . "kotlin") ("swift" . "swift")
+    ("json" . "json") ("yaml" . "yaml") ("yml" . "yaml")
+    ("toml" . "toml") ("nix" . "nix") ("lua" . "lua") ("sql" . "sql")
+    ("html" . "html") ("css" . "css") ("vue" . "vue"))
+  "File extension to fence language, tried before `auto-mode-alist'."
+  :type '(alist :key-type (string :tag "Extension")
+                :value-type (string :tag "Language")))
+
+(defun agent-shell-notes--fence-language (file)
+  "Return the fence language of FILE.
+From `agent-shell-notes-fence-languages', else the name of the major
+mode `auto-mode-alist' picks without `-ts-mode' or `-mode', else
+\"text\"."
+  (or (cdr (assoc (file-name-extension file)
+                  agent-shell-notes-fence-languages))
+      (let ((mode (assoc-default file auto-mode-alist #'string-match)))
+        ;; (MODE NON-NIL) entries; a lambda stays a lambda.
+        (when (and (consp mode) (not (functionp mode)))
+          (setq mode (car mode)))
+        (when (and mode (symbolp mode))
+          (replace-regexp-in-string "\\(-ts\\)?-mode\\'" ""
+                                    (symbol-name mode))))
+      "text"))
+
+(defconst agent-shell-notes--claude-blank
+  "[[:blank:]\v\f­​-‏⁠-⁯﻿⠀]"
+  "A blank as the Claude desktop serializer counts one.")
+
+(defun agent-shell-notes--claude-mentions (text)
+  "Return TEXT with each mention-like `@' made fullwidth.
+An `@' is mention-like when a word character follows it and none
+precedes it."
+  (replace-regexp-in-string "\\(?:^\\|[^[:alnum:]_]\\)\\(@\\)[[:alnum:]_]"
+                            "＠" text t t 1))
+
+(defun agent-shell-notes--claude-path (path)
+  "Return PATH sanitized for a Claude location line."
+  (agent-shell-notes--claude-mentions
+   (string-replace "`" "'" (replace-regexp-in-string "[\r\n]+" " " path))))
+
+(defun agent-shell-notes--claude-snippet (quote)
+  "Return QUOTE trimmed and sanitized for a Claude snippet.
+Lines that read like a location line, a `Reply ...:' line or an
+attachment marker get a `> ' in place of their leading blanks."
+  (let ((blank agent-shell-notes--claude-blank))
+    (replace-regexp-in-string
+     (concat "^" blank "*"
+             "\\(?:In\\b.*\\bat lines? [0-9]"
+             "\\|Reply\\b.*:" blank "*$"
+             "\\|<!-- attach\\)")
+     (lambda (line)
+       (concat "> " (replace-regexp-in-string (concat "\\`" blank "*") ""
+                                              line)))
+     (agent-shell-notes--claude-mentions
+      (mapconcat #'string-trim-right (split-string quote "\n") "\n"))
+     t t)))
+
+(defun agent-shell-notes--note-path (note project)
+  "Return the path of NOTE's file as sent to a target in PROJECT.
+Relative to the note's project, or absolute when PROJECT, if non-nil,
+is another project."
+  (let ((file (plist-get (alist-get :location note) :file))
+        (own (alist-get :project note)))
+    (if (and project
+             (not (equal (file-name-as-directory (expand-file-name project))
+                         (file-name-as-directory (expand-file-name own)))))
+        file
+      (file-relative-name file own))))
+
+(defun agent-shell-notes--claude-file-block (note project)
+  "Return the Claude block of file NOTE for a target in PROJECT."
+  (let* ((loc (alist-get :location note))
+         (quote (alist-get :quote note))
+         (text (alist-get :text note))
+         (lines (list (format "In `%s` at %s:"
+                              (agent-shell-notes--claude-path
+                               (agent-shell-notes--note-path note project))
+                              (agent-shell-notes--range-string loc)))))
+    (when quote
+      (let* ((snippet (agent-shell-notes--claude-snippet quote))
+             (fence (agent-shell-notes--fence snippet)))
+        (setq lines (append lines
+                            (list (concat fence
+                                          (agent-shell-notes--fence-language
+                                           (plist-get loc :file)))
+                                  snippet fence)))))
+    (unless (string-empty-p text)
+      (setq lines (append lines (list text))))
+    (string-join lines "\n")))
+
+(defun agent-shell-notes--render (notes request project)
+  "Return NOTES and REQUEST rendered in `agent-shell-notes-style'.
+NOTES are in review order.  PROJECT is the target's project, or nil
+when there is no target; a note from another project gets an absolute
+path."
+  (let ((blocks (mapconcat (lambda (note)
+                             (agent-shell-notes--claude-file-block
+                              note project))
+                           notes "\n\n"))
+        (request (string-trim request)))
+    (cond ((string-empty-p request) blocks)
+          ((string-empty-p blocks) request)
+          (t (concat blocks "\n\n\n" request)))))
+
 ;;;; Quote folding
 
 (defconst agent-shell-notes--fold-lines 6
@@ -356,6 +472,8 @@ Kept apart from the review buffer, which is redrawn from scratch.")
   "k" #'agent-shell-notes-delete
   "D" #'agent-shell-notes-delete-marked
   "e" #'agent-shell-notes-edit
+  "C-c C-c" #'agent-shell-notes-send
+  "w" #'agent-shell-notes-copy
   "C-c C-e" #'agent-shell-notes-edit-mode
   "C-x C-q" #'agent-shell-notes-edit-mode
   "q" #'quit-window)
@@ -512,11 +630,55 @@ group by line."
     (when (memq id agent-shell-notes--marks)
       (agent-shell-notes--show-mark id beg (point)))))
 
+(defvar agent-shell-notes-request-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map markdown-mode-map)
+    ;; Keys a text-property map leaves unbound fall through to the
+    ;; review's map, so the printing characters must insert here.
+    (dotimes (i 95)
+      (let ((key (string (+ 32 i))))
+        (unless (lookup-key markdown-mode-map key)
+          (keymap-set map (key-description key) #'self-insert-command))))
+    (keymap-set map "C-c C-c" #'agent-shell-notes-send)
+    map)
+  "Keymap of the request body in the review.
+It is the body's `keymap' text property, so it shadows the review's
+note keys there and letters insert.")
+
+(defvar-local agent-shell-notes--request-start nil
+  "Marker at the start of the request body in the review.
+The body runs from here to the end of the buffer.")
+
+(defun agent-shell-notes--request-text ()
+  "Return the request body of the review, or \"\" when there is none."
+  (if-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name))
+            (start (buffer-local-value 'agent-shell-notes--request-start
+                                       buffer)))
+      (with-current-buffer buffer
+        (buffer-substring-no-properties start (point-max)))
+    ""))
+
+(defun agent-shell-notes--insert-request (request)
+  "Insert the read-only request heading, then the writable REQUEST body.
+The newline before the body passes the body's properties on but not
+`read-only', so text typed into an empty body is writable and takes
+the request keymap.  Edit mode leaves the keymap off, so its own keys
+work in the body too."
+  (let ((props (append (list 'agent-shell-notes-field 'request)
+                       (unless agent-shell-notes-edit-mode
+                         (list 'keymap agent-shell-notes-request-map)))))
+    (insert (propertize "# Request\n\n" 'read-only t))
+    (add-text-properties (1- (point)) (point)
+                         (append '(rear-nonsticky (read-only)) props))
+    (setq agent-shell-notes--request-start (point-marker))
+    (insert (apply #'propertize request props))))
+
 (defun agent-shell-notes--review-draw ()
   "Redraw the current review buffer from the note list.
-Point stays on the note it was on."
+Point stays on the note it was on.  The request body is kept."
   (let ((id (get-text-property (point) 'agent-shell-notes-id))
         (pos (point))
+        (request (agent-shell-notes--request-text))
         (inhibit-read-only t))
     (remove-overlays)
     (erase-buffer)
@@ -535,6 +697,8 @@ Point stays on the note it was on."
     (put-text-property (point-min) (min (1+ (point-min)) (point-max))
                        'front-sticky '(read-only))
     (agent-shell-notes--edit-open-slots)
+    (goto-char (point-max))
+    (agent-shell-notes--insert-request request)
     (goto-char (or (and id (text-property-any (point-min) (point-max)
                                               'agent-shell-notes-id id))
                    (min pos (point-max))))
@@ -715,6 +879,144 @@ With no note marked, this marks them all."
           agent-shell-notes--unfolded (delq id agent-shell-notes--unfolded)
           agent-shell-notes--marks (delq id agent-shell-notes--marks))
     (agent-shell-notes--review-draw)))
+
+;;;; Send and copy
+
+(defcustom agent-shell-notes-agent-shell-disposition nil
+  "How the agent-shell client sends to a busy shell.
+nil leaves it to `agent-shell-busy-submit-default-function'; `queue'
+queues the prompt; `steer' steers the running turn."
+  :type '(choice (const :tag "agent-shell default" nil)
+                 (const :tag "Queue" queue)
+                 (const :tag "Steer" steer)))
+
+(defun agent-shell-notes--directory (dir)
+  "Return DIR expanded, as a directory name."
+  (file-name-as-directory (expand-file-name dir)))
+
+(defun agent-shell-notes--agent-shell-project (shell)
+  "Return the project directory of SHELL."
+  (buffer-local-value 'default-directory shell))
+
+(defun agent-shell-notes--agent-shell-sort (shells hint)
+  "Return SHELLS ordered for the picker by HINT.
+The last target first, then shells in one of HINT's projects, then the
+rest; within each band SHELLS keep their order."
+  (let ((last (plist-get hint :last))
+        (projects (mapcar #'agent-shell-notes--directory
+                          (plist-get hint :projects))))
+    (seq-sort-by (lambda (shell)
+                   (cond ((eq shell last) 0)
+                         ((member (agent-shell-notes--directory
+                                   (agent-shell-notes--agent-shell-project
+                                    shell))
+                                  projects)
+                          1)
+                         (t 2)))
+                 #'< shells)))
+
+(defun agent-shell-notes--agent-shell-read-session (hint)
+  "Pick a live shell, ordered by HINT, and return its buffer.
+HINT is a plist (:projects LIST :last SESSION)."
+  (let ((shells (agent-shell-buffers)))
+    (unless shells
+      (user-error "No agent-shell session"))
+    (agent-shell--read-shell-buffer
+     :prompt "Send notes to: "
+     :buffers (agent-shell-notes--agent-shell-sort shells hint))))
+
+(defun agent-shell-notes--agent-shell-send (shell text)
+  "Send TEXT to SHELL as one prompt.
+Refuse a shell whose agent has no session yet: agent-shell would hold
+the prompt until the agent starts and still return normally."
+  (unless (buffer-live-p shell)
+    (user-error "The agent-shell session is gone"))
+  (unless (agent-shell-session-id :shell-buffer shell)
+    (user-error "Starting agent, please wait"))
+  (with-current-buffer shell
+    (agent-shell--prompt-send
+     :prompt text
+     :disposition agent-shell-notes-agent-shell-disposition)))
+
+(defun agent-shell-notes--agent-shell-session-id (shell)
+  "Return the ACP session id of SHELL."
+  (agent-shell-session-id :shell-buffer shell))
+
+(defun agent-shell-notes--agent-shell-turn-count (shell)
+  "Return the number of turns in SHELL."
+  (with-current-buffer shell
+    (length (agent-shell--turns))))
+
+(defconst agent-shell-notes-agent-shell-client
+  (list :read-session #'agent-shell-notes--agent-shell-read-session
+        :send #'agent-shell-notes--agent-shell-send
+        :name #'buffer-name
+        :project #'agent-shell-notes--agent-shell-project
+        :session-id #'agent-shell-notes--agent-shell-session-id
+        :turn-count #'agent-shell-notes--agent-shell-turn-count)
+  "The agent-shell client; a session is a shell buffer.")
+
+(defcustom agent-shell-notes-client agent-shell-notes-agent-shell-client
+  "The client notes are sent to, a plist of functions:
+
+  :read-session (HINT) -> SESSION   pick a target; HINT is
+                                    (:projects LIST :last SESSION)
+  :send (SESSION TEXT)              send TEXT; returning normally
+                                    means sent
+  :name (SESSION) -> string         the session's name
+  :project (SESSION) -> directory   the session's project
+  :session-id (SESSION) -> string   the session's id
+  :turn-count (SESSION) -> integer  the number of turns so far"
+  :type '(plist :value-type function))
+
+(defvar agent-shell-notes--last-target nil
+  "The session of the last successful send.")
+
+(defun agent-shell-notes--selected-notes ()
+  "Return the marked notes in review order, else the note at point.
+Marks of deleted notes are ignored.  Signal `user-error' when there is
+nothing to send."
+  (let* ((notes (apply #'append (agent-shell-notes--groups)))
+         (marked (seq-filter (lambda (note)
+                               (memq (alist-get :id note)
+                                     agent-shell-notes--marks))
+                             notes))
+         (id (get-text-property (point) 'agent-shell-notes-id)))
+    (or marked
+        (and id (seq-filter (lambda (note) (eql id (alist-get :id note)))
+                            notes))
+        (user-error "No note at point"))))
+
+(defun agent-shell-notes-send ()
+  "Send the marked notes, else the note at point, and the request.
+Pick a target session, render the notes in `agent-shell-notes-style'
+and send them as one prompt."
+  (interactive)
+  (let* ((notes (agent-shell-notes--selected-notes))
+         (client agent-shell-notes-client)
+         (session (funcall (plist-get client :read-session)
+                           (list :projects
+                                 (delete-dups
+                                  (mapcar (lambda (note)
+                                            (alist-get :project note))
+                                          notes))
+                                 :last agent-shell-notes--last-target)))
+         (text (agent-shell-notes--render
+                notes (agent-shell-notes--request-text)
+                (funcall (plist-get client :project) session))))
+    (funcall (plist-get client :send) session text)
+    (setq agent-shell-notes--last-target session)
+    (message "Sent %d notes to %s" (length notes)
+             (funcall (plist-get client :name) session))))
+
+(defun agent-shell-notes-copy ()
+  "Copy the text a send of the same notes would send.
+Paths are relative, as there is no target.  Nothing else changes."
+  (interactive)
+  (let ((notes (agent-shell-notes--selected-notes)))
+    (kill-new (agent-shell-notes--render
+               notes (agent-shell-notes--request-text) nil))
+    (message "Copied %d notes" (length notes))))
 
 (defun agent-shell-notes-delete-marked ()
   "Delete the marked notes, after confirmation."

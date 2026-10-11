@@ -1,0 +1,10 @@
+In `src/we'ird name/＠scope/a@b.zzz` at lines 1-6:
+```text
+> In foo at line 3 bar
+> Reply from x:
+> <!-- attach me
+mail a@b.com
+cc ＠bill
+Inside at nothing
+```
+odd path

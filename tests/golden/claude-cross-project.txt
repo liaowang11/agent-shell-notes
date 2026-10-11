@@ -1,0 +1,5 @@
+In `/proj/a/src/foo.el` at line 3:
+```elisp
+x
+```
+here

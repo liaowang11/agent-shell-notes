@@ -1,0 +1,14 @@
+In `src/foo.el` at line 3:
+```elisp
+(let ((cache (make-hash-table)))
+```
+hoist the cache
+
+In `src/foo.el` at lines 10-11:
+```elisp
+  (puthash key value cache)
+  cache)
+```
+
+
+fix both, then run make check
