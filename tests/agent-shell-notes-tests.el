@@ -2434,6 +2434,144 @@ The header and the turn position read a shell-maker shell."
           (with-current-buffer review
             (should (equal "go" (agent-shell-notes-tests--request)))))))))
 
+;;;; Send all
+
+(defun agent-shell-notes-tests--send-all (&optional compose)
+  "Run `agent-shell-notes-send-all', with a prefix when COMPOSE."
+  (let ((current-prefix-arg (and compose '(4))))
+    (call-interactively #'agent-shell-notes-send-all)))
+
+(ert-deftest agent-shell-notes-send-all-ignores-marks ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ a" dir "s1")))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--goto-note 2)
+        (agent-shell-notes-tests--key "m")
+        (goto-char (point-max))
+        (agent-shell-notes-tests--type "all of it")
+        (agent-shell-notes-tests--send-all)
+        (should (equal (list (list shell
+                                   (agent-shell-notes-tests--expected
+                                    dir 1 2 3 "all of it")
+                                   nil))
+                       agent-shell-notes-tests--sent))
+        ;; After-send, clearing and the redraw, as for `C-c C-c'.
+        (should-not (agent-shell-notes-tests--ids))
+        (should-not (agent-shell-notes-tests--runs 'agent-shell-notes-id))
+        (should-not agent-shell-notes--marks)
+        (should (equal "" (agent-shell-notes-tests--request)))
+        (should (eq shell agent-shell-notes--last-target))
+        ;; Restore-last puts the notes, the mark and the request back.
+        (agent-shell-notes-restore-last)
+        (should (equal '(1 2 3) (agent-shell-notes-tests--ids)))
+        (should (equal '(1 2 3) (agent-shell-notes-tests--runs
+                                 'agent-shell-notes-id)))
+        (should (equal '(2) agent-shell-notes--marks))
+        (should (equal "all of it" (agent-shell-notes-tests--request)))))))
+
+(ert-deftest agent-shell-notes-send-all-skips-archived-notes ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 3))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ s" dir "s1"))
+           (agent-shell-notes-after-send 'archive))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-marked shell '(2))
+        (agent-shell-notes-tests--send-all)
+        (should (equal (agent-shell-notes-tests--expected dir 1 3)
+                       (nth 1 (car agent-shell-notes-tests--sent))))
+        ;; Every note archived: refused before the picker.
+        (setq agent-shell-notes-tests--picked nil)
+        (should (equal "No unarchived notes"
+                       (cadr (should-error
+                              (agent-shell-notes-tests--send-all)
+                              :type 'user-error))))
+        (should-not agent-shell-notes-tests--picked)
+        (should (= 2 (length agent-shell-notes-tests--sent)))))))
+
+(ert-deftest agent-shell-notes-send-all-refusals ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ r" dir "s1")))
+      (goto-char (point-max))
+      (agent-shell-notes-tests--type "go")
+      (let ((before (agent-shell-notes-tests--review-state)))
+        ;; No live shell: the same error as `C-c C-c'.
+        (agent-shell-notes-tests--with-boundary nil #'car #'ignore
+          (should (equal "No agent-shell session"
+                         (cadr (should-error
+                                (agent-shell-notes-tests--send-all)
+                                :type 'user-error)))))
+        ;; A client without `:compose' refuses `C-u' before the picker.
+        (let ((agent-shell-notes-client
+               (map-delete (copy-sequence agent-shell-notes-agent-shell-client)
+                           :compose)))
+          (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+            (should (string-suffix-p
+                     " cannot fill a compose buffer"
+                     (cadr (should-error
+                            (agent-shell-notes-tests--send-all t)
+                            :type 'user-error))))
+            (should-not agent-shell-notes-tests--picked)
+            (should-not agent-shell-notes-tests--sent)))
+        (should (equal before (agent-shell-notes-tests--review-state)))
+        (should-not agent-shell-notes--last-target))
+      ;; No note at all: refused before the picker.
+      (setq agent-shell-notes--notes nil)
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (should (equal "No unarchived notes"
+                       (cadr (should-error
+                              (agent-shell-notes-tests--send-all)
+                              :type 'user-error))))
+        (should-not agent-shell-notes-tests--picked)))))
+
+(ert-deftest agent-shell-notes-send-all-without-the-review ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ w" dir "s1")))
+      (kill-buffer "*agent-shell-notes*")
+      (set-buffer src)
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--send-all)
+        (should (equal (agent-shell-notes-tests--expected dir 1 2)
+                       (nth 1 (car agent-shell-notes-tests--sent))))
+        (should-not (agent-shell-notes-tests--ids))))))
+
+(ert-deftest agent-shell-notes-send-all-composes-with-prefix ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((src (agent-shell-notes-tests--review-with 2))
+           (dir (buffer-local-value 'default-directory src))
+           (shell (agent-shell-notes-tests--shell "Claude Agent @ p" dir "s1"))
+           (review (current-buffer))
+           (agent-shell-notes-after-send 'archive))
+      (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
+        (agent-shell-notes-tests--with-viewport
+          (let ((viewport (alist-get :buffer
+                                     (agent-shell-viewport--show-buffer
+                                      :append "my draft" :shell-buffer shell
+                                      :edit t :disposition 'queue))))
+            (set-buffer review)
+            (goto-char (point-max))
+            (agent-shell-notes-tests--type "go")
+            (set-buffer src)
+            (agent-shell-notes-tests--send-all t)
+            (should-not agent-shell-notes-tests--sent)
+            (should (eq viewport (window-buffer (selected-window))))
+            (with-current-buffer viewport
+              (should (equal (concat "my draft\n\n"
+                                     (agent-shell-notes-tests--expected
+                                      dir 1 2 "go"))
+                             (string-trim (buffer-string))))
+              (should (eq 'queue agent-shell-viewport--compose-disposition)))
+            (should (equal "Claude Agent @ p"
+                           (agent-shell-notes-tests--archived 2)))
+            (with-current-buffer review
+              (should (equal "" (agent-shell-notes-tests--request))))))))))
+
 ;;;; Dired and fallback capture
 
 (defun agent-shell-notes-tests--dired (names)

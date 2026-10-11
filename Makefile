@@ -43,8 +43,8 @@ check: compile test
 
 # Deliberately not part of `check': this starts a real agent, spends real
 # API tokens, and waits on model output that is not deterministic.  Run it
-# by hand before tagging a release.  The live test arrives with the
-# send-all ticket (docs/work/agent-shell-notes/issues/14-send-all-and-live-check.md).
+# by hand before tagging a release.  It needs claude-agent-acp on PATH
+# and a logged-in Claude account.
 live-check:
 	$(BATCH) -L . -L tests/live $(DEPS_LOAD_PATH) \
 		-l agent-shell-notes-live \

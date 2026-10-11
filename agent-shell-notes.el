@@ -1624,8 +1624,25 @@ Pick a target session, render the notes in `agent-shell-notes-style'
 and send them as one prompt.  With prefix argument COMPOSE, put the
 prompt in the target's compose buffer instead, to edit before sending."
   (interactive "P")
-  (let* ((notes (agent-shell-notes--selected-notes))
-         (client agent-shell-notes-client)
+  (agent-shell-notes--send-notes (agent-shell-notes--selected-notes) compose))
+
+;;;###autoload
+(defun agent-shell-notes-send-all (&optional compose)
+  "Send every note that is not archived, and the request.
+As `agent-shell-notes-send' with every note marked, without opening
+the review; marks are ignored.  With prefix argument COMPOSE, put the
+prompt in the target's compose buffer instead."
+  (interactive "P")
+  (agent-shell-notes--send-notes
+   (or (seq-remove (lambda (note) (alist-get :archived note))
+                   (apply #'append (agent-shell-notes--groups)))
+       (user-error "No unarchived notes"))
+   compose))
+
+(defun agent-shell-notes--send-notes (notes compose)
+  "Send NOTES and the request to a picked session, then apply after-send.
+With COMPOSE, fill the session's compose buffer instead."
+  (let* ((client agent-shell-notes-client)
          (_ (when (and compose (not (plist-get client :compose)))
               (user-error "Client %S cannot fill a compose buffer" client)))
          (session (funcall (plist-get client :read-session)
