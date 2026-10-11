@@ -11,13 +11,19 @@
 
 ;;; Commentary:
 
-;; Select text in a Magit diff, a file, a dired listing, an agent-shell
+;; Select text in a Magit diff, a file, a Dired listing, an agent-shell
 ;; transcript or any other buffer, write a remark, and keep going.  The
 ;; remarks collect in one global review.  From the review, mark some or all,
 ;; pick a live agent-shell session, and send them as one prompt rendered in
-;; the wire format of a chosen agent app.
+;; the wire format of a chosen agent app (Claude desktop, Codex, omp),
+;; optionally followed by a free-text request.
 ;;
-;; Magit is optional: the Magit source is skipped when Magit is not loaded.
+;; Entry commands: `agent-shell-notes-capture', `agent-shell-notes-review'
+;; and `agent-shell-notes-send-all'.  The package binds no global keys;
+;; README.md suggests bindings and lists the review keys and options.
+;;
+;; Notes live only in the running Emacs.  Magit is optional: the Magit
+;; source is skipped when Magit is not loaded.
 
 ;;; Code:
 
@@ -354,7 +360,7 @@ Markdown as `agent-shell-copy-as-markdown' would give it."
           :end end)))
 
 (defun agent-shell-notes--dired-p ()
-  "Return non-nil in a dired buffer."
+  "Return non-nil in a Dired buffer."
   (derived-mode-p 'dired-mode))
 
 (defun agent-shell-notes--dired-extract ()
@@ -455,7 +461,7 @@ A `magit' note stores it relative to the note's project."
                     (alist-get :project note)))
 
 (defun agent-shell-notes--dired-names (note &optional dir)
-  "Return the files of dired NOTE, comma-joined.
+  "Return the files of Dired NOTE, comma-joined.
 Relative to DIR, default the note's project."
   (mapconcat (lambda (file)
                (file-relative-name file (or dir (alist-get :project note))))
@@ -650,7 +656,7 @@ The first marker carries the number of blocks."
   "Claude sends at most this many reply blocks.")
 
 (defun agent-shell-notes--claude-dired-block (note project)
-  "Return the Claude block of dired NOTE for a target in PROJECT."
+  "Return the Claude block of Dired NOTE for a target in PROJECT."
   (let ((text (alist-get :text note))
         (about (format "About %s:"
                        (mapconcat
@@ -707,7 +713,7 @@ reply blocks).  TURN-COUNT is the target's number of turns."
 
 (defun agent-shell-notes--claude-render (notes request project session-id)
   "Return NOTES and REQUEST in the `claude' style.
-See `agent-shell-notes--render' for the arguments."
+PROJECT and SESSION-ID are as for `agent-shell-notes--render'."
   (let* ((replies (seq-take
                    (seq-filter
                     (lambda (note)
@@ -916,7 +922,8 @@ backtick goes in a `text' fence, else inline in double quotes."
 (defun agent-shell-notes--omp-note (note project session-id turn-count number)
   "Return (HEADING NUMBERED BODY) for NOTE in the `omp' style.
 HEADING is nil for a note that opens none; NUMBERED is non-nil when
-BODY uses NUMBER.  See `agent-shell-notes--render' for the rest."
+BODY uses NUMBER.  PROJECT, SESSION-ID and TURN-COUNT are as for
+`agent-shell-notes--render'."
   (let ((loc (alist-get :location note))
         (quote (alist-get :quote note))
         (text (alist-get :text note)))
@@ -950,8 +957,8 @@ BODY uses NUMBER.  See `agent-shell-notes--render' for the rest."
                                             turn-count)
   "Return NOTES and REQUEST in the `omp' style.
 Each note goes under its heading; consecutive notes with the same
-heading share it.  Item numbers run across the send.  See
-`agent-shell-notes--render' for the arguments."
+heading share it.  Item numbers run across the send.  PROJECT,
+SESSION-ID and TURN-COUNT are as for `agent-shell-notes--render'."
   (let ((number 1) sections heading)
     (dolist (note notes)
       (pcase-let ((`(,head ,numbered ,body)
