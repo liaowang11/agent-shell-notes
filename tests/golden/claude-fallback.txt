@@ -1,0 +1,11 @@
+In buffer `*Help*` (help-mode) at lines 3-4:
+```text
+Signature
+(foo ARG)
+```
+is ARG optional?
+
+In buffer `*scratch*` (lisp-interaction-mode) at line 1:
+```text
+(+ 1 2)
+```

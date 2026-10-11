@@ -24,6 +24,7 @@
 (require 'agent-shell)
 (require 'markdown-mode)
 (require 'project)
+(require 'dired)
 
 (defgroup agent-shell-notes nil
   "Collect review notes and send them to agent-shell."
@@ -90,8 +91,51 @@ ending at the start of a line does not touch that line."
           :beg beg
           :end end)))
 
+(defun agent-shell-notes--dired-p ()
+  "Return non-nil in a dired buffer."
+  (derived-mode-p 'dired-mode))
+
+(defun agent-shell-notes--dired-extract ()
+  "Extract a `dired' note: paths only, no quote.
+With a region, the files on the lines it touches; else the marked
+files, else the file at point."
+  (pcase-let* ((`(,beg ,end) (agent-shell-notes--line-extent))
+               (files
+                (if (use-region-p)
+                    (save-excursion
+                      (goto-char beg)
+                      (let (files)
+                        (while (progn
+                                 ;; As dired's own region marking, skip
+                                 ;; . and ..
+                                 (when-let* ((file (dired-get-filename nil t))
+                                             ((not (looking-at-p dired-re-dot))))
+                                   (push file files))
+                                 (and (zerop (forward-line 1))
+                                      (<= (point) end))))
+                        (nreverse files)))
+                  (dired-get-marked-files))))
+    (unless files
+      (user-error "No file at point"))
+    (list :location (list :files files
+                          :directory (expand-file-name default-directory))
+          :quote nil
+          :beg beg
+          :end end)))
+
+(defun agent-shell-notes--buffer-extract ()
+  "Extract a `buffer' note: the region's lines, else the current line."
+  (pcase-let ((`(,beg ,end ,start ,last) (agent-shell-notes--line-extent)))
+    (list :location (list :buffer (buffer-name) :mode major-mode
+                          :start start :end last)
+          :quote (buffer-substring-no-properties beg end)
+          :beg beg
+          :end end)))
+
 (defcustom agent-shell-notes-sources
-  '((file buffer-file-name agent-shell-notes--file-extract))
+  '((dired agent-shell-notes--dired-p agent-shell-notes--dired-extract)
+    (file buffer-file-name agent-shell-notes--file-extract)
+    (buffer always agent-shell-notes--buffer-extract))
   "Source types tried in order by `agent-shell-notes-capture'.
 Each entry is (SYMBOL PREDICATE EXTRACT).  The first entry whose
 PREDICATE, called with no arguments in the buffer being captured,
@@ -102,7 +146,11 @@ returns a plist:
   :quote     the text copied from the source, or nil
   :beg :end  buffer positions of the captured extent, kept as markers
 
-SYMBOL becomes the note's `:source'."
+SYMBOL becomes the note's `:source'.  The last entry, `buffer',
+matches every buffer; add a new mode's entry before it.  The review
+and the styles show a source they do not know as a `buffer' note, so
+its location should carry `:buffer', `:mode', `:start' and `:end', as
+`agent-shell-notes--buffer-extract' returns."
   :type '(repeat (list (symbol :tag "Source")
                        (function :tag "Predicate")
                        (function :tag "Extract"))))
@@ -134,6 +182,14 @@ SYMBOL becomes the note's `:source'."
     (if (eql start end)
         (format "line %d" start)
       (format "lines %d-%d" start end))))
+
+(defun agent-shell-notes--dired-names (note &optional dir)
+  "Return the files of dired NOTE, comma-joined.
+Relative to DIR, default the note's project."
+  (mapconcat (lambda (file)
+               (file-relative-name file (or dir (alist-get :project note))))
+             (plist-get (alist-get :location note) :files)
+             ", "))
 
 (defun agent-shell-notes--fence (text)
   "Return a backtick fence longer than any backtick run in TEXT."
@@ -213,11 +269,12 @@ attachment marker get a `> ' in place of their leading blanks."
       (mapconcat #'string-trim-right (split-string quote "\n") "\n"))
      t t)))
 
-(defun agent-shell-notes--note-path (note project)
+(defun agent-shell-notes--note-path (note project &optional file)
   "Return the path of NOTE's file as sent to a target in PROJECT.
 Relative to the note's project, or absolute when PROJECT, if non-nil,
-is another project."
-  (let ((file (plist-get (alist-get :location note) :file))
+is another project.  FILE, if non-nil, is the file instead of the
+note's `:file'."
+  (let ((file (or file (plist-get (alist-get :location note) :file)))
         (own (alist-get :project note)))
     (if (and project
              (not (equal (file-name-as-directory (expand-file-name project))
@@ -246,14 +303,53 @@ is another project."
       (setq lines (append lines (list text))))
     (string-join lines "\n")))
 
+(defun agent-shell-notes--claude-dired-block (note project)
+  "Return the Claude block of dired NOTE for a target in PROJECT."
+  (let ((text (alist-get :text note))
+        (about (format "About %s:"
+                       (mapconcat
+                        (lambda (file)
+                          (format "`%s`" (agent-shell-notes--claude-path
+                                          (agent-shell-notes--note-path
+                                           note project file))))
+                        (plist-get (alist-get :location note) :files)
+                        ", "))))
+    (if (string-empty-p text)
+        about
+      (concat about "\n" text))))
+
+(defun agent-shell-notes--claude-buffer-block (note)
+  "Return the Claude block of `buffer' NOTE.
+The buffer has no file to name a language, so the fence says `text'."
+  (let* ((loc (alist-get :location note))
+         (snippet (agent-shell-notes--claude-snippet (alist-get :quote note)))
+         (fence (agent-shell-notes--fence snippet))
+         (text (alist-get :text note)))
+    (string-join
+     (append (list (format "In buffer `%s` (%s) at %s:"
+                           (agent-shell-notes--claude-path
+                            (plist-get loc :buffer))
+                           (plist-get loc :mode)
+                           (agent-shell-notes--range-string loc))
+                   (concat fence "text") snippet fence)
+             (unless (string-empty-p text) (list text)))
+     "\n")))
+
+(defun agent-shell-notes--claude-block (note project)
+  "Return the Claude block of NOTE for a target in PROJECT."
+  (pcase (alist-get :source note)
+    ('file (agent-shell-notes--claude-file-block note project))
+    ('dired (agent-shell-notes--claude-dired-block note project))
+    ;; `buffer', and any source added by the user.
+    (_ (agent-shell-notes--claude-buffer-block note))))
+
 (defun agent-shell-notes--render (notes request project)
   "Return NOTES and REQUEST rendered in `agent-shell-notes-style'.
 NOTES are in review order.  PROJECT is the target's project, or nil
 when there is no target; a note from another project gets an absolute
 path."
   (let ((blocks (mapconcat (lambda (note)
-                             (agent-shell-notes--claude-file-block
-                              note project))
+                             (agent-shell-notes--claude-block note project))
                            notes "\n\n"))
         (request (string-trim request)))
     (cond ((string-empty-p request) blocks)
@@ -368,9 +464,14 @@ The location and quote at the top are read-only; the note goes below.
   (let ((quote (alist-get :quote note))
         (loc (alist-get :location note)))
     (insert (propertize
-             (concat (file-relative-name (plist-get loc :file)
-                                         (alist-get :project note))
-                     " " (agent-shell-notes--range-string loc))
+             (pcase (alist-get :source note)
+               ('file (concat (file-relative-name (plist-get loc :file)
+                                                  (alist-get :project note))
+                              " " (agent-shell-notes--range-string loc)))
+               ('dired (agent-shell-notes--dired-names note))
+               (_ (format "%s (%s) %s" (plist-get loc :buffer)
+                          (plist-get loc :mode)
+                          (agent-shell-notes--range-string loc))))
              'face 'agent-shell-notes-location)
             "\n")
     (when quote
@@ -568,7 +669,11 @@ An emptied text keeps the note, quote only."
   "Return the key of the review group NOTE belongs to."
   (pcase (alist-get :source note)
     ('file (cons (plist-get (alist-get :location note) :file)
-                 (alist-get :project note)))))
+                 (alist-get :project note)))
+    ('dired (cons (plist-get (alist-get :location note) :directory)
+                  (alist-get :project note)))
+    ;; `buffer', and any source added by the user.
+    (_ (plist-get (alist-get :location note) :buffer))))
 
 (defun agent-shell-notes--group-heading (note)
   "Return the review heading of the group NOTE belongs to."
@@ -578,7 +683,15 @@ An emptied text keeps the note, quote only."
                      (file-relative-name
                       (plist-get (alist-get :location note) :file) project)
                      (abbreviate-file-name
-                      (directory-file-name project)))))))
+                      (directory-file-name project)))))
+    ('dired (let ((project (alist-get :project note)))
+              (format "# %s — %s"
+                      (file-relative-name
+                       (plist-get (alist-get :location note) :directory)
+                       project)
+                      (abbreviate-file-name
+                       (directory-file-name project)))))
+    (_ (format "# %s" (plist-get (alist-get :location note) :buffer)))))
 
 (defun agent-shell-notes--groups ()
   "Return the notes as a list of groups, each a list of notes.
@@ -611,8 +724,14 @@ group by line."
         (text (alist-get :text note)))
     (agent-shell-notes--insert-field
      'location
-     (propertize (concat (format "**%s**" (agent-shell-notes--range-string
-                                           (alist-get :location note)))
+     (propertize (concat (format "**%s**"
+                                 (pcase (alist-get :source note)
+                                   ('dired (agent-shell-notes--dired-names
+                                            note (plist-get
+                                                  (alist-get :location note)
+                                                  :directory)))
+                                   (_ (agent-shell-notes--range-string
+                                       (alist-get :location note)))))
                          (when-let* ((target (alist-get :archived note)))
                            (format " `sent to %s`" target)))
                  'face 'agent-shell-notes-location))

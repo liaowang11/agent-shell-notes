@@ -1621,5 +1621,232 @@ The header and the turn position read a shell-maker shell."
           (with-current-buffer review
             (should (equal "go" (agent-shell-notes-tests--request)))))))))
 
+;;;; Dired and fallback capture
+
+(defun agent-shell-notes-tests--dired (names)
+  "Return a dired buffer on a fresh temporary directory holding NAMES.
+The directory is not inside a project."
+  (let ((dir (file-name-as-directory (make-temp-file "asn-dired-" t))))
+    (dolist (name names)
+      (with-temp-file (expand-file-name name dir)))
+    (let ((buffer (dired-noselect dir)))
+      (push buffer agent-shell-notes-tests--shells)
+      buffer)))
+
+(defun agent-shell-notes-tests--dired-capture (buffer setup &optional text)
+  "Show dired BUFFER, call SETUP there, capture and save TEXT.
+Return the saved note."
+  (switch-to-buffer buffer)
+  (transient-mark-mode 1)
+  (deactivate-mark)
+  (funcall setup)
+  (agent-shell-notes-capture)
+  (with-current-buffer "*agent-shell-notes capture*"
+    (goto-char (point-max))
+    (insert (or text ""))
+    (agent-shell-notes-capture-save))
+  (car (last agent-shell-notes--notes)))
+
+(ert-deftest agent-shell-notes-capture-dired-file-at-point ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
+           (dir (buffer-local-value 'default-directory buf))
+           (note (agent-shell-notes-tests--dired-capture
+                  buf (lambda () (dired-goto-file (expand-file-name "b.el" dir)))
+                  "look at b")))
+      (should (eq 'dired (alist-get :source note)))
+      (should (equal dir (alist-get :project note)))
+      (should (equal `(:files (,(expand-file-name "b.el" dir)) :directory ,dir)
+                     (alist-get :location note)))
+      (should (null (alist-get :quote note)))
+      (should (equal "look at b" (alist-get :text note)))
+      (should (eq buf (car (alist-get :markers note)))))))
+
+(ert-deftest agent-shell-notes-capture-dired-marked-files ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
+           (dir (buffer-local-value 'default-directory buf))
+           (note (agent-shell-notes-tests--dired-capture
+                  buf (lambda ()
+                        (dolist (name '("a.el" "c.el"))
+                          (dired-goto-file (expand-file-name name dir))
+                          (dired-mark 1))
+                        (dired-goto-file (expand-file-name "b.el" dir))))))
+      (should (equal (list (expand-file-name "a.el" dir)
+                           (expand-file-name "c.el" dir))
+                     (plist-get (alist-get :location note) :files))))))
+
+(ert-deftest agent-shell-notes-capture-dired-region-takes-its-lines ()
+  ;; From the top of the buffer (header lines hold no file) to the start
+  ;; of c.el's line: a.el and b.el, even with c.el marked.
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
+           (dir (buffer-local-value 'default-directory buf))
+           (note (agent-shell-notes-tests--dired-capture
+                  buf (lambda ()
+                        (dired-goto-file (expand-file-name "c.el" dir))
+                        (dired-mark 1)
+                        (dired-goto-file (expand-file-name "c.el" dir))
+                        (beginning-of-line)
+                        (push-mark (point-min) t t)))))
+      (should (equal (list (expand-file-name "a.el" dir)
+                           (expand-file-name "b.el" dir))
+                     (plist-get (alist-get :location note) :files)))
+      ;; A region running to the end of the buffer ends the walk there.
+      (setq note (agent-shell-notes-tests--dired-capture
+                  buf (lambda ()
+                        (dired-goto-file (expand-file-name "b.el" dir))
+                        (push-mark (point) t t)
+                        (goto-char (point-max)))))
+      (should (equal (list (expand-file-name "b.el" dir)
+                           (expand-file-name "c.el" dir))
+                     (plist-get (alist-get :location note) :files))))))
+
+(ert-deftest agent-shell-notes-capture-dired-no-file-signals ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--dired '("a.el"))))
+      (switch-to-buffer buf)
+      (goto-char (point-min))
+      (should (equal "No file at point"
+                     (cadr (should-error (agent-shell-notes-capture)
+                                         :type 'user-error))))
+      (should-not (get-buffer "*agent-shell-notes capture*")))))
+
+(ert-deftest agent-shell-notes-review-groups-dired-notes-by-directory ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
+           (dir (buffer-local-value 'default-directory buf))
+           (file (agent-shell-notes-tests--file
+                  (agent-shell-notes-tests--lines 3)))
+           (goto (lambda (name)
+                   (lambda () (dired-goto-file (expand-file-name name dir))))))
+      (agent-shell-notes-tests--dired-capture buf (funcall goto "c.el") "c") ; 1
+      (agent-shell-notes-tests--capture file 2 nil "file")                  ; 2
+      (agent-shell-notes-tests--dired-capture
+       buf (lambda ()
+             (dired-goto-file (expand-file-name "a.el" dir))
+             (push-mark (point) t t)
+             (forward-line 2))
+       "a and b")                                                          ; 3
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should (equal (list (cons dir dir)
+                             (cons (buffer-file-name file)
+                                   (file-name-directory
+                                    (buffer-file-name file))))
+                       (agent-shell-notes-tests--runs
+                        'agent-shell-notes-group)))
+        ;; Dired notes keep capture order inside their group.
+        (should (equal '(1 3 2) (agent-shell-notes-tests--runs
+                                 'agent-shell-notes-id)))
+        (should (equal '(location text)
+                       (agent-shell-notes-tests--note-fields 3)))
+        (should (equal "**a.el, b.el**"
+                       (agent-shell-notes-tests--field-text 3 'location)))))))
+
+(defun agent-shell-notes-tests--dired-note (id project dir files text)
+  "Return a `dired' note ID for FILES in DIR, both relative to PROJECT."
+  `((:id . ,id) (:source . dired) (:project . ,project)
+    (:location . (:files ,(mapcar (lambda (file) (concat project file)) files)
+                  :directory ,(concat project dir)))
+    (:quote . nil) (:text . ,text) (:markers . nil) (:archived . nil)
+    (:created . nil)))
+
+(ert-deftest agent-shell-notes-render-claude-dired ()
+  (let ((notes (list (agent-shell-notes-tests--dired-note
+                      1 "/proj/a/" "src/" '("src/a.el" "src/b.el")
+                      "rename these")
+                     (agent-shell-notes-tests--dired-note
+                      2 "/proj/a/" "docs/" '("docs/x.md") ""))))
+    (should (equal (agent-shell-notes-tests--golden "claude-dired")
+                   (agent-shell-notes--render notes "" "/proj/a/")))
+    ;; Another project: absolute paths.
+    (should (string-prefix-p "About `/proj/a/src/a.el`, `/proj/a/src/b.el`:"
+                             (agent-shell-notes--render notes "" "/proj/b/")))))
+
+(defun agent-shell-notes-tests--buffer (name mode lines)
+  "Return a fresh buffer NAME without a file, in MODE, holding LINES.
+Its `default-directory' is a temporary directory outside any project."
+  (let ((buffer (get-buffer-create name)))
+    (push buffer agent-shell-notes-tests--shells)
+    (with-current-buffer buffer
+      (funcall mode)
+      (setq default-directory
+            (file-name-as-directory (make-temp-file "asn-buffer-" t)))
+      (let ((inhibit-read-only t))
+        (insert (mapconcat #'identity lines "\n") "\n")))
+    buffer))
+
+(ert-deftest agent-shell-notes-capture-fallback-records-buffer-and-mode ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((buf (agent-shell-notes-tests--buffer
+                 "*asn-help*" #'help-mode (agent-shell-notes-tests--lines 5)))
+           (dir (buffer-local-value 'default-directory buf))
+           (note (agent-shell-notes-tests--capture buf 2 4 "two lines"))
+           (one (agent-shell-notes-tests--capture buf 5)))
+      (should (eq 'buffer (alist-get :source note)))
+      (should (equal dir (alist-get :project note)))
+      (should (equal '(:buffer "*asn-help*" :mode help-mode :start 2 :end 3)
+                     (alist-get :location note)))
+      (should (equal "line 2\nline 3" (alist-get :quote note)))
+      (should (equal "two lines" (alist-get :text note)))
+      (should (equal '(:buffer "*asn-help*" :mode help-mode :start 5 :end 5)
+                     (alist-get :location one)))
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should (equal '("*asn-help*") (agent-shell-notes-tests--runs
+                                        'agent-shell-notes-group)))
+        (should (equal '(1 2) (agent-shell-notes-tests--runs
+                               'agent-shell-notes-id)))
+        (should (equal "**lines 2-3**"
+                       (agent-shell-notes-tests--field-text 1 'location)))))))
+
+(defun agent-shell-notes-tests--buffer-note (id buffer mode start end quote text)
+  "Return a `buffer' note ID for BUFFER in MODE, lines START-END."
+  `((:id . ,id) (:source . buffer) (:project . "/proj/a/")
+    (:location . (:buffer ,buffer :mode ,mode :start ,start :end ,end))
+    (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+    (:created . nil)))
+
+(ert-deftest agent-shell-notes-render-claude-fallback ()
+  (should (equal (agent-shell-notes-tests--golden "claude-fallback")
+                 (agent-shell-notes--render
+                  (list (agent-shell-notes-tests--buffer-note
+                         1 "*Help*" 'help-mode 3 4
+                         "Signature  \n(foo ARG)" "is ARG optional?")
+                        (agent-shell-notes-tests--buffer-note
+                         2 "*scratch*" 'lisp-interaction-mode 1 1
+                         "(+ 1 2)" ""))
+                  "" "/proj/b/"))))
+
+(ert-deftest agent-shell-notes-sources-entry-before-fallback-wins ()
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((help (agent-shell-notes-tests--buffer
+                  "*asn-help*" #'help-mode (agent-shell-notes-tests--lines 3)))
+           (plain (agent-shell-notes-tests--buffer
+                   "*asn-plain*" #'fundamental-mode
+                   (agent-shell-notes-tests--lines 3)))
+           (fallback (car (last agent-shell-notes-sources)))
+           (agent-shell-notes-sources
+            (append (butlast agent-shell-notes-sources)
+                    (list (list 'help
+                                (lambda () (derived-mode-p 'help-mode))
+                                #'agent-shell-notes--buffer-extract)
+                          fallback))))
+      (should (eq 'buffer (car fallback)))
+      (should (eq 'help (alist-get :source
+                                   (agent-shell-notes-tests--capture help 2))))
+      (should (eq 'buffer (alist-get :source
+                                     (agent-shell-notes-tests--capture plain 2))))
+      ;; The review and the style show it as a buffer note.
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should (equal '("*asn-help*" "*asn-plain*")
+                       (agent-shell-notes-tests--runs
+                        'agent-shell-notes-group))))
+      (should (string-prefix-p
+               "In buffer `*asn-help*` (help-mode) at line 2:"
+               (agent-shell-notes--render agent-shell-notes--notes "" nil))))))
+
 (provide 'agent-shell-notes-tests)
 ;;; agent-shell-notes-tests.el ends here
