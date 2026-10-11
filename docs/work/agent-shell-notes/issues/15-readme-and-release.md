@@ -69,3 +69,30 @@ locally.
 Unverified: upstream agent-shell compatibility; the Doom snippet in the
 README was not run; `make live-check` (ticket 14) awaits a fresh Claude
 login.
+
+### Code review fixes
+
+claude, 2026-10-12. One commit per finding (or small group):
+1. Mention rule only in paths: 6f10592 (also `--trim-lines` in
+   `--claude-snippet`, finding 8). `claude-sanitize.txt` now keeps
+   `cc @bill` in the quote; new test for `@decorator` and `,@body`.
+2. omp nil `:turn`: e4c84ca. Heading `# Feedback on Assistant message`,
+   never "last reply"; recorded on ticket 13.
+3. Review quote fence names the file's language (`text` without a
+   file): 3aaa48c. The capture popup uses the same function.
+4. Note commands (`n`, `p`, `m`, `u`, `k`, `e`, `TAB`) refuse the
+   request body with "Point is in the request": 5d6c889. Send, copy and
+   jump keep their own errors.
+5. DESIGN §6.2 `:project` row: dd0fa47.
+6. Stubs of `agent-shell-viewport--buffer` and `agent-shell--turns`
+   removed; the turn-count test uses a real three-turn transcript:
+   f28a61a. §11 unchanged.
+7. Magit review test asserts the group heading run and face runs in the
+   location field: 0b5abeb.
+8. `--own-session-p`, `--line-range` (under `--range-string`, codex
+   `Lines:`, the omp heading), `--directory` moved up and used in
+   `--note-path` and `--codex-workspace`, codex file path via
+   `--note-path`, one heading format in `--group-heading`: fea3750.
+9. `--other-session-quote`, `agent-shell-notes--request-map`: db17299.
+
+Goldens are byte-identical after 6f10592. `make check` green.

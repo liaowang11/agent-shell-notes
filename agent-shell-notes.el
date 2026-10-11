@@ -446,13 +446,24 @@ its location should carry `:buffer', `:mode', `:start' and `:end', as
 
 ;;;; Display helpers
 
-(defun agent-shell-notes--range-string (location)
-  "Return \"line N\" or \"lines S-E\" for LOCATION."
+(defun agent-shell-notes--line-range (location)
+  "Return \"N\" or \"S-E\", the lines of LOCATION."
   (let ((start (plist-get location :start))
         (end (plist-get location :end)))
     (if (eql start end)
-        (format "line %d" start)
-      (format "lines %d-%d" start end))))
+        (number-to-string start)
+      (format "%d-%d" start end))))
+
+(defun agent-shell-notes--range-string (location)
+  "Return \"line N\" or \"lines S-E\" for LOCATION."
+  (concat (if (eql (plist-get location :start) (plist-get location :end))
+              "line "
+            "lines ")
+          (agent-shell-notes--line-range location)))
+
+(defun agent-shell-notes--directory (dir)
+  "Return DIR expanded, as a directory name."
+  (file-name-as-directory (expand-file-name dir)))
 
 (defun agent-shell-notes--note-file (note)
   "Return the absolute path of NOTE's file.
@@ -556,8 +567,7 @@ attachment marker get a `> ' in place of their leading blanks."
      (lambda (line)
        (concat "> " (replace-regexp-in-string (concat "\\`" blank "*") ""
                                               line)))
-     (agent-shell-notes--claude-mentions
-      (mapconcat #'string-trim-right (split-string quote "\n") "\n"))
+     (agent-shell-notes--trim-lines quote)
      t t)))
 
 (defun agent-shell-notes--note-path (note project &optional file)
@@ -568,8 +578,8 @@ note's `:file'."
   (let ((file (or file (agent-shell-notes--note-file note)))
         (own (alist-get :project note)))
     (if (and project
-             (not (equal (file-name-as-directory (expand-file-name project))
-                         (file-name-as-directory (expand-file-name own)))))
+             (not (equal (agent-shell-notes--directory project)
+                         (agent-shell-notes--directory own))))
         file
       (file-relative-name file own))))
 
@@ -614,8 +624,8 @@ its deletions; the old side keeps `-' lines."
       (setq lines (append lines (list text))))
     (string-join lines "\n")))
 
-(defun agent-shell-notes--claude-quote-block (note)
-  "Return the Claude block of transcript NOTE from another session.
+(defun agent-shell-notes--other-session-quote (note)
+  "Return the block of transcript NOTE from another session, any style.
 A `> ' quote, then the note text after a blank line."
   (let ((text (alist-get :text note)))
     (concat (agent-shell-notes--block-quote (alist-get :quote note))
@@ -691,7 +701,7 @@ The buffer has no file to name a language, so the fence says `text'."
   "Return the Claude block of NOTE for a target in PROJECT."
   (pcase (alist-get :source note)
     ((or 'file 'magit) (agent-shell-notes--claude-file-block note project))
-    ('transcript (agent-shell-notes--claude-quote-block note))
+    ('transcript (agent-shell-notes--other-session-quote note))
     ('dired (agent-shell-notes--claude-dired-block note project))
     ;; `buffer', and any source added by the user.
     (_ (agent-shell-notes--claude-buffer-block note))))
@@ -711,17 +721,21 @@ reply blocks).  TURN-COUNT is the target's number of turns."
                                          session-id turn-count))
     (_ (agent-shell-notes--claude-render notes request project session-id))))
 
+(defun agent-shell-notes--own-session-p (note session-id)
+  "Non-nil when NOTE is a transcript note from session SESSION-ID.
+SESSION-ID nil, no target, makes every note foreign."
+  (and session-id
+       (eq (alist-get :source note) 'transcript)
+       (equal session-id
+              (plist-get (alist-get :location note) :session-id))))
+
 (defun agent-shell-notes--claude-render (notes request project session-id)
   "Return NOTES and REQUEST in the `claude' style.
 PROJECT and SESSION-ID are as for `agent-shell-notes--render'."
   (let* ((replies (seq-take
                    (seq-filter
                     (lambda (note)
-                      (and session-id
-                           (eq (alist-get :source note) 'transcript)
-                           (equal session-id
-                                  (plist-get (alist-get :location note)
-                                             :session-id))
+                      (and (agent-shell-notes--own-session-p note session-id)
                            (not (string-empty-p
                                  (string-trim (alist-get :text note))))))
                     notes)
@@ -742,20 +756,10 @@ PROJECT and SESSION-ID are as for `agent-shell-notes--render'."
 (defun agent-shell-notes--codex-workspace (note project)
   "Return NOTE's `Workspace:' line for a target in PROJECT, or nil.
 Only when PROJECT is non-nil and differs from the note's project."
-  (let ((own (file-name-as-directory (expand-file-name
-                                      (alist-get :project note)))))
+  (let ((own (agent-shell-notes--directory (alist-get :project note))))
     (when (and project
-               (not (equal own (file-name-as-directory
-                                (expand-file-name project)))))
+               (not (equal own (agent-shell-notes--directory project))))
       (concat "Workspace: " (directory-file-name own)))))
-
-(defun agent-shell-notes--codex-lines (location)
-  "Return the `Lines:' line of LOCATION: `Lines: S-E', or `Lines: N'."
-  (let ((start (plist-get location :start))
-        (end (plist-get location :end)))
-    (if (eql start end)
-        (format "Lines: %d" start)
-      (format "Lines: %d-%d" start end))))
 
 (defun agent-shell-notes--codex-fenced (lang text)
   "Return TEXT in a fence with info string LANG."
@@ -773,18 +777,17 @@ NOTE is a `magit', `file', `dired' or `buffer' note."
                    (agent-shell-notes--codex-workspace note project)
                    ;; A mixed selection is a new-side one.
                    (if (eq (plist-get loc :side) 'old) "Side: L" "Side: R")
-                   (agent-shell-notes--codex-lines loc)
+                   (concat "Lines: " (agent-shell-notes--line-range loc))
                    "Diff hunk:"
                    (agent-shell-notes--codex-fenced
                     "diff" (mapconcat (lambda (hunk)
                                         (string-remove-suffix "\n" hunk))
                                       (plist-get loc :hunks) "\n"))))
             ('file
-             (list (concat "File: " (file-relative-name
-                                     (plist-get loc :file)
-                                     (alist-get :project note)))
+             ;; Always relative: another project adds `Workspace:'.
+             (list (concat "File: " (agent-shell-notes--note-path note nil))
                    (agent-shell-notes--codex-workspace note project)
-                   (agent-shell-notes--codex-lines loc)
+                   (concat "Lines: " (agent-shell-notes--line-range loc))
                    (agent-shell-notes--codex-fenced
                     (agent-shell-notes--fence-language (plist-get loc :file))
                     (agent-shell-notes--trim-lines (alist-get :quote note)))))
@@ -796,7 +799,7 @@ NOTE is a `magit', `file', `dired' or `buffer' note."
             (_
              (list (format "Buffer: %s (%s)"
                            (plist-get loc :buffer) (plist-get loc :mode))
-                   (agent-shell-notes--codex-lines loc)
+                   (concat "Lines: " (agent-shell-notes--line-range loc))
                    (agent-shell-notes--codex-fenced
                     "text"
                     (agent-shell-notes--trim-lines (alist-get :quote note))))))))
@@ -837,13 +840,9 @@ Sections in the Codex app's order: transcript notes from SESSION-ID as
 response annotations, quotes from other sessions, diff comments for
 the rest, then `## My request:'."
   (let* ((n 0)
-         (own (seq-filter
-               (lambda (note)
-                 (and session-id
-                      (eq (alist-get :source note) 'transcript)
-                      (equal session-id (plist-get (alist-get :location note)
-                                                   :session-id))))
-               notes))
+         (own (seq-filter (lambda (note)
+                            (agent-shell-notes--own-session-p note session-id))
+                          notes))
          (quotes (seq-filter (lambda (note)
                                (and (eq (alist-get :source note) 'transcript)
                                     (not (memq note own))))
@@ -857,7 +856,7 @@ the rest, then `## My request:'."
          (sections
           (append
            (when own (list (agent-shell-notes--codex-annotations own)))
-           (mapcar #'agent-shell-notes--claude-quote-block quotes)
+           (mapcar #'agent-shell-notes--other-session-quote quotes)
            (when comments
              (list (string-join (cons "# Diff comments:" comments) "\n\n")))))
          (request (string-trim request)))
@@ -884,15 +883,13 @@ the rest, then `## My request:'."
   "Return the omp block of `magit' NOTE for a target in PROJECT."
   (let* ((loc (alist-get :location note))
          (path (agent-shell-notes--note-path note project))
-         (start (plist-get loc :start))
-         (end (plist-get loc :end))
          (quote (agent-shell-notes--trim-lines (alist-get :quote note)))
          (fence (agent-shell-notes--fence quote))
          (text (alist-get :text note)))
     (string-join
      (append
       (list (format "### %s — %s %s" path (plist-get loc :side)
-                    (if (eql start end) start (format "%d-%d" start end)))
+                    (agent-shell-notes--line-range loc))
             (format "Path: `%s`" path)
             "")
       (mapcar (lambda (hunk)
@@ -930,16 +927,16 @@ BODY uses NUMBER.  PROJECT, SESSION-ID and TURN-COUNT are as for
     (pcase (alist-get :source note)
       ('magit (list agent-shell-notes--omp-diff-heading nil
                     (agent-shell-notes--omp-diff-note note project)))
-      ((and 'transcript
-            (guard (and session-id
-                        (equal session-id (plist-get loc :session-id)))))
+      ((guard (agent-shell-notes--own-session-p note session-id))
        (let ((turn (plist-get loc :turn)))
-         (list (if (eql turn turn-count)
-                   "# Feedback on your last reply"
-                 (format "# Feedback on Assistant message %d" turn))
+         ;; A note captured before the first prompt has no turn: it is
+         ;; never the last reply, and its heading names no number.
+         (list (cond ((null turn) "# Feedback on Assistant message")
+                     ((eql turn turn-count) "# Feedback on your last reply")
+                     (t (format "# Feedback on Assistant message %d" turn)))
                t (agent-shell-notes--omp-item number quote text))))
       ('transcript (list nil nil
-                         (agent-shell-notes--claude-quote-block note)))
+                         (agent-shell-notes--other-session-quote note)))
       ('file (list (format "# Feedback on %s"
                            (agent-shell-notes--note-path note project))
                    t (agent-shell-notes--omp-item number quote text)))
@@ -1019,6 +1016,7 @@ popup it is the popup's quote."
   "Fold or unfold the quote of the note at point.
 In the note area of the capture popup, do what TAB does in Markdown."
   (interactive)
+  (agent-shell-notes--refuse-in-request)
   (let ((ov (unless (and agent-shell-notes--text-start
                          (>= (point) agent-shell-notes--text-start))
               (agent-shell-notes--fold-overlay)))
@@ -1071,15 +1069,20 @@ In the note area of the capture popup, do what TAB does in Markdown."
 
 (defun agent-shell-notes--insert-quote (note &optional open)
   "Insert NOTE's quote at point, folded unless OPEN, if it has one.
-A transcript quote is a `> ' block; any other quote is fenced."
+A transcript quote is a `> ' block; any other quote is fenced, with
+the file's language, or `text' when there is no file."
   (when-let* ((quote (alist-get :quote note)))
     (if (eq (alist-get :source note) 'transcript)
         (let ((beg (point)))
           (insert (agent-shell-notes--block-quote quote))
           (agent-shell-notes--fold-quote beg (point) open)
           (insert "\n"))
-      (let ((fence (agent-shell-notes--fence quote)))
-        (insert fence "\n")
+      (let ((fence (agent-shell-notes--fence quote))
+            (file (plist-get (alist-get :location note) :file)))
+        (insert fence (if file
+                          (agent-shell-notes--fence-language file)
+                        "text")
+                "\n")
         (let ((beg (point)))
           (insert quote)
           (agent-shell-notes--fold-quote beg (point) open))
@@ -1302,6 +1305,7 @@ stays read-only and ends the text."
 (defun agent-shell-notes-edit ()
   "Enter edit mode with point at the end of the text of the note at point."
   (interactive)
+  (agent-shell-notes--refuse-in-request)
   (let ((id (get-text-property (point) 'agent-shell-notes-id)))
     (unless id
       (user-error "No note at point"))
@@ -1341,22 +1345,18 @@ An emptied text keeps the note, quote only."
 
 (defun agent-shell-notes--group-heading (note)
   "Return the review heading of the group NOTE belongs to."
-  (pcase (alist-get :source note)
-    ((or 'file 'magit)
-     (let ((project (alist-get :project note)))
+  (let ((project (alist-get :project note)))
+    (pcase (alist-get :source note)
+      ('transcript (concat "# " (agent-shell-notes--location-string note)))
+      ((and (or 'file 'magit 'dired) source)
        (format "# %s — %s"
-               (file-relative-name (agent-shell-notes--note-file note)
-                                   project)
-               (abbreviate-file-name (directory-file-name project)))))
-    ('transcript (concat "# " (agent-shell-notes--location-string note)))
-    ('dired (let ((project (alist-get :project note)))
-              (format "# %s — %s"
-                      (file-relative-name
-                       (plist-get (alist-get :location note) :directory)
-                       project)
-                      (abbreviate-file-name
-                       (directory-file-name project)))))
-    (_ (format "# %s" (plist-get (alist-get :location note) :buffer)))))
+               (file-relative-name
+                (if (eq source 'dired)
+                    (plist-get (alist-get :location note) :directory)
+                  (agent-shell-notes--note-file note))
+                project)
+               (abbreviate-file-name (directory-file-name project))))
+      (_ (format "# %s" (plist-get (alist-get :location note) :buffer))))))
 
 (defun agent-shell-notes--tags (note)
   "Return the review tags of NOTE, a list of strings."
@@ -1441,7 +1441,7 @@ group by line."
     (when (memq id agent-shell-notes--marks)
       (agent-shell-notes--show-mark id beg (point)))))
 
-(defvar agent-shell-notes-request-map
+(defvar agent-shell-notes--request-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map markdown-mode-map)
     ;; Keys a text-property map leaves unbound fall through to the
@@ -1460,6 +1460,13 @@ note keys there and letters insert.")
   "Marker at the start of the request body in the review.
 The body runs from here to the end of the buffer.")
 
+(defun agent-shell-notes--refuse-in-request ()
+  "Signal `user-error' when point is in the request body of the review.
+Note commands call this first: the body holds no note."
+  (when (and agent-shell-notes--request-start
+             (>= (point) agent-shell-notes--request-start))
+    (user-error "Point is in the request")))
+
 (defun agent-shell-notes--request-text ()
   "Return the request body of the review, or \"\" when there is none."
   (if-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name))
@@ -1477,7 +1484,7 @@ the request keymap.  Edit mode leaves the keymap off, so its own keys
 work in the body too."
   (let ((props (append (list 'agent-shell-notes-field 'request)
                        (unless agent-shell-notes-edit-mode
-                         (list 'keymap agent-shell-notes-request-map)))))
+                         (list 'keymap agent-shell-notes--request-map)))))
     (insert (propertize "# Request\n\n" 'read-only t))
     (add-text-properties (1- (point)) (point)
                          (append '(rear-nonsticky (read-only)) props))
@@ -1544,6 +1551,7 @@ Every window showing it stays on the note it showed."
 (defun agent-shell-notes-next-note ()
   "Move to the start of the next note."
   (interactive)
+  (agent-shell-notes--refuse-in-request)
   (let ((pos (point)))
     (while (and (setq pos (next-single-property-change
                            pos 'agent-shell-notes-id))
@@ -1555,6 +1563,7 @@ Every window showing it stays on the note it showed."
 (defun agent-shell-notes-previous-note ()
   "Move to the start of the previous note."
   (interactive)
+  (agent-shell-notes--refuse-in-request)
   (let ((pos (agent-shell-notes--note-start (point))))
     (while (and (setq pos (previous-single-property-change
                            pos 'agent-shell-notes-id))
@@ -1636,6 +1645,7 @@ Signal `user-error' when there is none."
 (defun agent-shell-notes--mark-at-point (mark)
   "Mark the notes at point when MARK is non-nil, else unmark them.
 Then move to the note after the last one, if any."
+  (agent-shell-notes--refuse-in-request)
   (let* ((ids (agent-shell-notes--ids-at-point))
          (last (car (last ids))))
     (deactivate-mark)
@@ -1681,6 +1691,7 @@ With no note marked, this marks them all."
 (defun agent-shell-notes-delete ()
   "Delete the note at point, without confirmation."
   (interactive)
+  (agent-shell-notes--refuse-in-request)
   (let ((id (get-text-property (point) 'agent-shell-notes-id)))
     (unless id
       (user-error "No note at point"))
@@ -1780,10 +1791,6 @@ queues the prompt; `steer' steers the running turn."
   :type '(choice (const :tag "agent-shell default" nil)
                  (const :tag "Queue" queue)
                  (const :tag "Steer" steer)))
-
-(defun agent-shell-notes--directory (dir)
-  "Return DIR expanded, as a directory name."
-  (file-name-as-directory (expand-file-name dir)))
 
 (defun agent-shell-notes--agent-shell-project (shell)
   "Return the project directory of SHELL."

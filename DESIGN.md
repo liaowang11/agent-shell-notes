@@ -297,6 +297,7 @@ the agent-shell client:
 | `:send` | `(session text)` | `(with-current-buffer session (agent-shell--prompt-send :prompt text :disposition agent-shell-notes-agent-shell-disposition))` (`agent-shell-prompt-queue.el:450`) |
 | `:compose` (optional) | `(session text)` | see 6.3 |
 | `:name` | `(session) → string` | `buffer-name`, used for the `sent to` tag |
+| `:project` | `(session) → directory` | the shell's `default-directory`; decides relative or absolute paths at render (8) |
 | `:session-id` | `(session) → string` | `(:session :id)` of the shell's `agent-shell--state`; decides "own session" at render |
 | `:turn-count` | `(session) → integer` | `(length (agent-shell--turns))`; decides "last reply" at render |
 

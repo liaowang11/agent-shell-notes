@@ -346,6 +346,34 @@ Runs where PROP is nil are skipped."
                                            'read-only t))
         (should-error (insert "x") :type 'text-read-only)))))
 
+(ert-deftest agent-shell-notes-review-fences-quote-with-language ()
+  ;; §5.1: the quote fence names the file's language; a buffer has no
+  ;; file, so `text'.
+  (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes--notes
+          (list (agent-shell-notes-tests--file-note
+                 1 "/proj/a/" "src/foo.el" 3 3 "(foo)" "")
+                (agent-shell-notes-tests--magit-note
+                 2 "/proj/a/" "src/bar.py" :side 'new :start 1 :end 1
+                 :type 'unstaged :quote "+x = 1")
+                `((:id . 3) (:source . buffer) (:project . "/proj/a/")
+                  (:location . (:buffer "*Help*" :mode help-mode
+                                :start 1 :end 1))
+                  (:quote . "help") (:text . "") (:markers . nil)
+                  (:archived . nil) (:created . nil))))
+    (agent-shell-notes-review)
+    (with-current-buffer "*agent-shell-notes*"
+      (pcase-dolist (`(,id . ,fence) '((1 . "```elisp") (2 . "```python")
+                                       (3 . "```text")))
+        (let ((quote (text-property-any
+                      (text-property-any (point-min) (point-max)
+                                         'agent-shell-notes-id id)
+                      (point-max) 'agent-shell-notes-field 'quote)))
+          (should (equal fence (buffer-substring-no-properties
+                                (save-excursion (goto-char quote)
+                                                (line-beginning-position 0))
+                                (1- quote)))))))))
+
 (ert-deftest agent-shell-notes-review-quote-only-note-has-no-text-field ()
   (agent-shell-notes-tests--with-clean-state
     (let ((buf (agent-shell-notes-tests--file
@@ -906,6 +934,31 @@ Note I is on line I, so the review order is 1 .. N."
   (buffer-substring-no-properties (agent-shell-notes-tests--request-start)
                                   (point-max)))
 
+(ert-deftest agent-shell-notes-review-note-commands-refuse-request-body ()
+  ;; §5.1: note commands from the request body `user-error'.  Letters
+  ;; type there, so the commands are called as from M-x.
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 2)
+    (let ((start (agent-shell-notes-tests--request-start)))
+      (goto-char start)
+      (insert "fix it")
+      (dolist (pos (list start (point-max)))
+        (dolist (command '(agent-shell-notes-next-note
+                           agent-shell-notes-previous-note
+                           agent-shell-notes-mark
+                           agent-shell-notes-unmark
+                           agent-shell-notes-delete
+                           agent-shell-notes-edit
+                           agent-shell-notes-toggle-quote))
+          (goto-char pos)
+          (should (equal '(user-error "Point is in the request")
+                         (should-error (call-interactively command)
+                                       :type 'user-error)))
+          (should (= pos (point)))))
+      (should (equal '(1 2) (agent-shell-notes-tests--ids)))
+      (should-not agent-shell-notes--marks)
+      (should-not agent-shell-notes-edit-mode))))
+
 (ert-deftest agent-shell-notes-review-request-body-takes-typing ()
   (agent-shell-notes-tests--with-clean-state
     (agent-shell-notes-tests--review-with 2)
@@ -968,10 +1021,11 @@ Note I is on line I, so the review order is 1 .. N."
 
 (defun agent-shell-notes-tests--file-note (id project file start end quote text)
   "Return a `file' note ID for FILE (relative to PROJECT), lines START-END."
-  `((:id . ,id) (:source . file) (:project . ,project)
-    (:location . (:file ,(concat project file) :start ,start :end ,end))
-    (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
-    (:created . nil)))
+  (copy-tree
+   `((:id . ,id) (:source . file) (:project . ,project)
+     (:location . (:file ,(concat project file) :start ,start :end ,end))
+     (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+     (:created . nil))))
 
 (ert-deftest agent-shell-notes-render-claude-file-notes ()
   (should (equal (agent-shell-notes-tests--golden "claude-file")
@@ -1022,6 +1076,26 @@ Note I is on line I, so the review order is 1 .. N."
                                  "Inside at nothing")
                          "odd path"))
                   "" "/proj/a/"))))
+
+(ert-deftest agent-shell-notes-render-claude-quote-keeps-at-signs ()
+  ;; §8.1 makes a mention-like `@' fullwidth in the path only.
+  (let ((quote "@decorator\n(defmacro m (&rest body) `(progn ,@body))"))
+    (should (equal (concat "In `a.py` at lines 1-2:\n```python\n" quote
+                           "\n```")
+                   (agent-shell-notes--render
+                    (list (agent-shell-notes-tests--file-note
+                           1 "/proj/a/" "a.py" 1 2 quote ""))
+                    "" "/proj/a/")))
+    (should (string-match-p
+             (regexp-quote (concat "```text\n" quote "\n```"))
+             (agent-shell-notes--render
+              (list `((:id . 1) (:source . buffer) (:project . "/proj/a/")
+                      (:location . (:buffer "*scratch*"
+                                    :mode lisp-interaction-mode
+                                    :start 1 :end 2))
+                      (:quote . ,quote) (:text . "") (:markers . nil)
+                      (:archived . nil) (:created . nil)))
+              "" nil)))))
 
 (ert-deftest agent-shell-notes-render-claude-fence-outgrows-backticks ()
   (should (equal (agent-shell-notes-tests--golden "claude-fence")
@@ -1770,6 +1844,27 @@ LOCATION also takes :quote and :text, which go to the note."
       (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
       (:created . nil))))
 
+(defun agent-shell-notes-tests--prop-text (prop)
+  "Return the text of the first run where PROP is non-nil."
+  (let ((beg (text-property-not-all (point-min) (point-max) prop nil)))
+    (buffer-substring-no-properties
+     beg (next-single-property-change beg prop nil (point-max)))))
+
+(defun agent-shell-notes-tests--location-faces (id)
+  "Return (FACE . TEXT) for each face run in the location of note ID."
+  (let* ((beg (text-property-any
+               (text-property-any (point-min) (point-max)
+                                  'agent-shell-notes-id id)
+               (point-max) 'agent-shell-notes-field 'location))
+         (end (next-single-property-change beg 'agent-shell-notes-field))
+         runs)
+    (while (< beg end)
+      (let ((next (next-single-property-change beg 'face nil end)))
+        (when-let* ((face (get-text-property beg 'face)))
+          (push (cons face (buffer-substring-no-properties beg next)) runs))
+        (setq beg next)))
+    (nreverse runs)))
+
 (ert-deftest agent-shell-notes-magit-review-shows-range-and-tags ()
   (agent-shell-notes-tests--with-clean-state
     (setq agent-shell-notes--notes
@@ -1787,22 +1882,25 @@ LOCATION also takes :quote and :text, which go to the note."
       (should (equal '(("/proj/a/src/foo.el" . "/proj/a/"))
                      (agent-shell-notes-tests--runs
                       'agent-shell-notes-group)))
-      (should (string-prefix-p "# src/foo.el — /proj/a\n" (buffer-string)))
-      (should (equal "**lines 3-4** `unstaged`"
-                     (agent-shell-notes-tests--field-text 1 'location)))
-      (should (equal "**line 7** `staged` `before changes`"
-                     (agent-shell-notes-tests--field-text 2 'location)))
-      (should (equal "**lines 9-10** `commit HEAD~1` `before changes`"
-                     (agent-shell-notes-tests--field-text 3 'location)))
+      (should (equal "# src/foo.el — /proj/a"
+                     (agent-shell-notes-tests--prop-text
+                      'agent-shell-notes-group)))
+      ;; The location field: the range in the location face, then one
+      ;; run in the tag face per tag.
+      (should (equal '((agent-shell-notes-location . "**lines 3-4**")
+                       (agent-shell-notes-tag . "`unstaged`"))
+                     (agent-shell-notes-tests--location-faces 1)))
+      (should (equal '((agent-shell-notes-location . "**line 7**")
+                       (agent-shell-notes-tag . "`staged`")
+                       (agent-shell-notes-tag . "`before changes`"))
+                     (agent-shell-notes-tests--location-faces 2)))
+      (should (equal '((agent-shell-notes-location . "**lines 9-10**")
+                       (agent-shell-notes-tag . "`commit HEAD~1`")
+                       (agent-shell-notes-tag . "`before changes`"))
+                     (agent-shell-notes-tests--location-faces 3)))
       (should (equal "+x\n y" (agent-shell-notes-tests--field-text 1 'quote)))
-      (should (eq 'agent-shell-notes-location
-                  (get-text-property (agent-shell-notes-tests--search
-                                      "\\*\\*lines 3-4")
-                                     'face)))
-      (should (eq 'agent-shell-notes-tag
-                  (get-text-property (agent-shell-notes-tests--search
-                                      "`unstaged`")
-                                     'face))))))
+      (should (equal '(1 2 3) (agent-shell-notes-tests--runs
+                               'agent-shell-notes-id))))))
 
 (ert-deftest agent-shell-notes-render-claude-diff-notes ()
   (should (equal (agent-shell-notes-tests--golden "claude-diff")
@@ -1902,15 +2000,14 @@ request count.  No process starts.  SESSION-ID defaults to \"sess-1\"."
               (propertize "<shell-maker-end-of-prompt>"
                           'shell-maker--marker t)
               "\n\n"))
-    (cl-letf (((symbol-function 'agent-shell-viewport--buffer) #'ignore))
-      (dolist (fragment fragments)
-        ;; A tool call is known to the state by its id, as a live one is.
-        (when (plist-get fragment :tool)
-          (setf (alist-get (plist-get fragment :block-id)
-                           (alist-get :tool-calls state) nil nil #'equal)
-                '((:status . "completed")))
-          (setq fragment (map-delete (copy-sequence fragment) :tool)))
-        (apply #'agent-shell--update-fragment :state state fragment)))
+    (dolist (fragment fragments)
+      ;; A tool call is known to the state by its id, as a live one is.
+      (when (plist-get fragment :tool)
+        (setf (alist-get (plist-get fragment :block-id)
+                         (alist-get :tool-calls state) nil nil #'equal)
+              '((:status . "completed")))
+        (setq fragment (map-delete (copy-sequence fragment) :tool)))
+      (apply #'agent-shell--update-fragment :state state fragment))
     (setq agent-shell--state state)))
 
 (defun agent-shell-notes-tests--two-turns (&optional name session-id)
@@ -2084,11 +2181,9 @@ request count.  No process starts.  SESSION-ID defaults to \"sess-1\"."
         (should (equal "partial ans" (alist-get :quote note)))
         (with-current-buffer shell
           (let ((agent-shell-persistent-prompt-enabled nil))
-            (cl-letf (((symbol-function 'agent-shell-viewport--buffer)
-                       #'ignore))
-              (agent-shell--update-fragment
-               :state agent-shell--state
-               :block-id "msg_C-agent_message_chunk" :body "wer" :append t))))
+            (agent-shell--update-fragment
+             :state agent-shell--state
+             :block-id "msg_C-agent_message_chunk" :body "wer" :append t)))
         (should (agent-shell-notes-tests--pos shell "partial answer"))
         (should (equal "partial ans" (alist-get :quote note)))))))
 
@@ -2194,13 +2289,14 @@ the header update is stubbed."
 
 (defun agent-shell-notes-tests--transcript-note (id session quote text)
   "Return a `transcript' note ID from SESSION with QUOTE and TEXT."
-  `((:id . ,id) (:source . transcript) (:project . "/proj/a/")
-    (:location . (:session-id ,session :shell ,(concat "Claude Agent @ "
-                                                        session)
-                              :turn 3 :kind message :prompt "the ask"
-                              :turn-end nil))
-    (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
-    (:created . nil)))
+  (copy-tree
+   `((:id . ,id) (:source . transcript) (:project . "/proj/a/")
+     (:location . (:session-id ,session :shell ,(concat "Claude Agent @ "
+                                                         session)
+                               :turn 3 :kind message :prompt "the ask"
+                               :turn-end nil))
+     (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+     (:created . nil))))
 
 (ert-deftest agent-shell-notes-render-claude-reply-own-session ()
   ;; DESIGN §8.1's worked example: the reply block goes first.
@@ -2697,11 +2793,12 @@ Return the saved note."
 
 (defun agent-shell-notes-tests--dired-note (id project dir files text)
   "Return a `dired' note ID for FILES in DIR, both relative to PROJECT."
-  `((:id . ,id) (:source . dired) (:project . ,project)
-    (:location . (:files ,(mapcar (lambda (file) (concat project file)) files)
-                  :directory ,(concat project dir)))
-    (:quote . nil) (:text . ,text) (:markers . nil) (:archived . nil)
-    (:created . nil)))
+  (copy-tree
+   `((:id . ,id) (:source . dired) (:project . ,project)
+     (:location . (:files ,(mapcar (lambda (file) (concat project file)) files)
+                          :directory ,(concat project dir)))
+     (:quote . nil) (:text . ,text) (:markers . nil) (:archived . nil)
+     (:created . nil))))
 
 (ert-deftest agent-shell-notes-render-claude-dired ()
   (let ((notes (list (agent-shell-notes-tests--dired-note
@@ -2754,10 +2851,11 @@ Its `default-directory' is a temporary directory outside any project."
 
 (defun agent-shell-notes-tests--buffer-note (id buffer mode start end quote text)
   "Return a `buffer' note ID for BUFFER in MODE, lines START-END."
-  `((:id . ,id) (:source . buffer) (:project . "/proj/a/")
-    (:location . (:buffer ,buffer :mode ,mode :start ,start :end ,end))
-    (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
-    (:created . nil)))
+  (copy-tree
+   `((:id . ,id) (:source . buffer) (:project . "/proj/a/")
+     (:location . (:buffer ,buffer :mode ,mode :start ,start :end ,end))
+     (:quote . ,quote) (:text . ,text) (:markers . nil) (:archived . nil)
+     (:created . nil))))
 
 (ert-deftest agent-shell-notes-render-claude-fallback ()
   (should (equal (agent-shell-notes-tests--golden "claude-fallback")
@@ -3316,6 +3414,25 @@ Built by hand: batch Emacs never redisplays, so `posn-at-point' fails."
                "# Feedback on Assistant message 3\n## 1. Feedback on:\n"
                (agent-shell-notes--render notes "" "/proj/a/" "s1" 4))))))
 
+(ert-deftest agent-shell-notes-render-omp-reply-without-turn ()
+  ;; Captured before the first prompt: no turn, so not the last reply,
+  ;; even when the target has no turns either.
+  (agent-shell-notes-tests--omp
+    ;; Copied: the helper's location shares a constant tail.
+    (let ((notes (copy-tree
+                  (list (agent-shell-notes-tests--transcript-note
+                         1 "s1" "Welcome." "hi")
+                        (agent-shell-notes-tests--transcript-note
+                         2 "s1" "Ready." "ok")))))
+      (dolist (note notes)
+        (setf (plist-get (alist-get :location note) :turn) nil))
+      (dolist (turn-count '(3 nil))
+        (should (equal (concat "# Feedback on Assistant message\n"
+                               "## 1. Feedback on:\n\"Welcome.\"\nhi\n"
+                               "## 2. Feedback on:\n\"Ready.\"\nok")
+                       (agent-shell-notes--render notes "" "/proj/a/"
+                                                  "s1" turn-count)))))))
+
 (ert-deftest agent-shell-notes-render-omp-reply-other-session ()
   (agent-shell-notes-tests--omp
     (let ((notes (list (agent-shell-notes-tests--transcript-note
@@ -3334,18 +3451,25 @@ Built by hand: batch Emacs never redisplays, so `posn-at-point' fails."
   ;; the last reply.
   (agent-shell-notes-tests--with-clean-state
     (agent-shell-notes-tests--omp
-      (let ((shell (agent-shell-notes-tests--shell
-                    "Claude Agent @ s1" "/proj/a/" "s1")))
+      (let ((shell (agent-shell-notes-tests--transcript
+                    "Claude Agent @ s1"
+                    (mapcar (lambda (n)
+                              (list (format "prompt %d" n)
+                                    (list :block-id
+                                          (format "msg_%d-agent_message_chunk" n)
+                                          :body (format "Reply %d.\n" n))))
+                            '(1 2 3))
+                    "s1")))
+        (should (= 3 (with-current-buffer shell
+                       (length (agent-shell--turns)))))
         (setq agent-shell-notes--notes
               (list (agent-shell-notes-tests--transcript-note
                      1 "s1" "the reply" "too vague")))
         (agent-shell-notes-review)
         (with-current-buffer "*agent-shell-notes*"
           (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
-            (cl-letf (((symbol-function 'agent-shell--turns)
-                       (lambda () '(t1 t2 t3))))
-              (agent-shell-notes-tests--goto-note 1)
-              (agent-shell-notes-tests--key "C-c C-c"))
+            (agent-shell-notes-tests--goto-note 1)
+            (agent-shell-notes-tests--key "C-c C-c")
             (should (equal (concat "# Feedback on your last reply\n"
                                    "## 1. Feedback on:\n"
                                    "\"the reply\"\ntoo vague")
