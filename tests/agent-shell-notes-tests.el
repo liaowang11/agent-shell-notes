@@ -2142,6 +2142,50 @@ property's."
         (should (equal "do hoist it" (agent-shell-notes-tests--note-text 1)))
         (should (equal "new" (agent-shell-notes-tests--note-text 2)))))))
 
+;; Font-lock marks links and URLs in a `> ' quote rear-nonsticky:
+;; markdown-mode through its markup properties, markdown-ts-mode through
+;; the `default-button' category of its link buttons.  Text after such a
+;; character must stay read-only.
+(ert-deftest agent-shell-notes-edit-mode-quotes-stay-read-only-after-font-lock ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 3))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")      ; id 1
+      (setq agent-shell-notes--notes
+            (append agent-shell-notes--notes
+                    (list (agent-shell-notes-tests--transcript-note
+                           2 "s1"
+                           (concat "see [the docs](http://x.y) and\n"
+                                   "http://p.q/r or <http://a.b>")
+                           ""))))
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-x C-q")
+        (agent-shell-notes-tests--fontify)
+        (let ((open (lambda (pos)
+                      (or (>= pos agent-shell-notes--request-start)
+                          (seq-some (pcase-lambda (`(,_ ,beg ,end))
+                                      (<= beg pos end))
+                                    agent-shell-notes--edit-slots)))))
+          (dolist (pos (number-sequence (point-min) (point-max)))
+            (unless (funcall open pos)
+              (should (equal (list pos nil)
+                             (list pos (agent-shell-notes-tests--writable-p
+                                        pos))))
+              (when (< pos (point-max))
+                (should-error (delete-region pos (1+ pos))
+                              :type 'text-read-only)))))
+        ;; The texts still take typing at both ends, the empty one too.
+        (pcase-dolist (`(,_ ,beg ,end) agent-shell-notes--edit-slots)
+          (should (agent-shell-notes-tests--writable-p beg))
+          (should (agent-shell-notes-tests--writable-p end)))
+        ;; Text typed at the start of a text inherits no `front-sticky'.
+        (pcase-dolist (`(,_ ,beg ,_) agent-shell-notes--edit-slots)
+          (goto-char beg)
+          (agent-shell-notes-tests--type "ab")
+          (should (equal "ab" (buffer-substring-no-properties beg (+ beg 2))))
+          (should-not (text-property-not-all beg (+ beg 2) 'front-sticky nil)))))))
+
 ;;;; The Markdown parent
 
 ;; The parent is chosen when the package loads, so one run of the suite

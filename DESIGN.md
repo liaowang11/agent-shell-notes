@@ -270,6 +270,16 @@ it is reached when the socket closes early
   `char-property-alias-alist`: markdown-mode's font-lock strips
   `rear-nonsticky` and markdown-ts-mode's strips `category`, but neither
   touches the package's own property.
+- The other half: every read-only character in the review is
+  `front-sticky (read-only)`, so nothing is inserted before it whatever
+  the character before says. Font-lock makes characters rear-nonsticky in
+  a `> ` quote: markdown-mode puts `rear-nonsticky t` on link markup and
+  URLs, markdown-ts-mode gives link buttons the `default-button` category,
+  which carries it. Neither font-lock manages `front-sticky`. An
+  edit-mode note text loses it along with `read-only`, so typed text never
+  carries it, and so does the newline that ends the text: that newline is
+  the one read-only character left not front-sticky, so the text takes
+  typing at its end.
 - Every note's extent is recorded as text properties
   (`agent-shell-notes-id` on the whole note, `agent-shell-notes-field` on
   `location`, `quote`, `text`) so keys, marks and edit mode know the

@@ -1425,11 +1425,12 @@ read-only.
   "Make the recorded note texts writable and track them with markers.
 The character before each text stops passing `read-only' on, so text
 typed at the start of a note text is writable; the newline after it
-stays read-only and ends the text."
+stays read-only, but not front-sticky, and ends the text."
   (setq agent-shell-notes--edit-slots
         (mapcar
          (pcase-lambda (`(,id ,beg ,end))
-           (remove-list-of-text-properties beg end '(read-only))
+           (remove-list-of-text-properties beg end '(read-only front-sticky))
+           (remove-list-of-text-properties end (1+ end) '(front-sticky))
            (agent-shell-notes--open-after (1- beg))
            (list id (copy-marker beg) (copy-marker end t)))
          agent-shell-notes--edit-slots)))
@@ -1605,7 +1606,7 @@ Note commands call this first: the body holds no note."
   "Insert the read-only request heading, then the writable REQUEST body.
 The newline before the body passes the body's properties on but not
 `read-only', so text typed into an empty body is writable."
-  (insert (propertize "# Request\n\n" 'read-only t))
+  (insert (propertize "# Request\n\n" 'read-only t 'front-sticky '(read-only)))
   (put-text-property (1- (point)) (point) 'agent-shell-notes-field 'request)
   (agent-shell-notes--open-after (1- (point)))
   (setq agent-shell-notes--request-start (point-marker))
@@ -1630,10 +1631,11 @@ Point stays on the note it was on.  The request body is kept."
       (dolist (note group)
         (agent-shell-notes--insert-note note)
         (insert "\n")))
-    (add-text-properties (point-min) (point-max) '(read-only t))
-    ;; Nothing before the first character passes `read-only' on.
-    (put-text-property (point-min) (min (1+ (point-min)) (point-max))
-                       'front-sticky '(read-only))
+    ;; Front-sticky, so no insertion slips in before a read-only
+    ;; character: font-lock makes some characters rear-nonsticky, such
+    ;; as a link or URL in a `> ' quote.
+    (add-text-properties (point-min) (point-max)
+                         '(read-only t front-sticky (read-only)))
     (agent-shell-notes--edit-open-slots)
     (goto-char (point-max))
     (agent-shell-notes--insert-request request)
