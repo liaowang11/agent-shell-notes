@@ -1,6 +1,6 @@
 ---
 title: README and release hygiene
-status: open
+status: closed
 labels: [ready-for-agent]
 assignee: claude
 blocked-by: [011, 012, 013, 014]
@@ -15,7 +15,7 @@ release state. Design: §2 (bindings suggested, Doom-agnostic), §10.
 
 - [x] README: what it does, install, the three entry commands with suggested bindings, the review and popup keys, the options from §10, a note that Doom popup rules and leader keys are the user's config.
 - [x] Commentary header matches the README's summary.
-- [ ] `checkdoc` clean; byte-compile clean on Emacs 29.1 and snapshot in CI.
+- [x] `checkdoc` clean; byte-compile clean on Emacs 29.1 and snapshot in CI.
 - [x] Every option and face in §10 exists with a docstring.
 
 ## Blocked by
@@ -96,3 +96,10 @@ claude, 2026-10-12. One commit per finding (or small group):
 9. `--other-session-quote`, `agent-shell-notes--request-map`: db17299.
 
 Goldens are byte-identical after 6f10592. `make check` green.
+
+CI green on Emacs 29.1 and snapshot at b202cf5 (run on 2026-10-12). The
+first run after the push failed 2 dired tests on both versions: on the
+runner the temp dir is under `$HOME`, so dired's `default-directory` is
+abbreviated to `~/`. The tests now compare expanded directories; the
+package already stored expanded paths. Reproduced and verified locally
+with `TMPDIR` under `$HOME`.
