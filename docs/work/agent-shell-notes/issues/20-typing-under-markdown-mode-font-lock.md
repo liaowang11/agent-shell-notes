@@ -2,7 +2,7 @@
 title: Typing survives markdown-mode font-lock
 status: open
 labels: [ready-for-agent]
-assignee:
+assignee: claude
 blocked-by: []
 ---
 
