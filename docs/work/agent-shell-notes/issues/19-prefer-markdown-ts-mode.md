@@ -2,7 +2,7 @@
 title: Prefer markdown-ts-mode, fall back to markdown-mode
 status: open
 labels: [ready-for-agent]
-assignee:
+assignee: claude
 blocked-by: [018]
 ---
 
