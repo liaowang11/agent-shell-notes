@@ -970,7 +970,7 @@ Note I is on line I, so the review order is 1 .. N."
       (goto-char start)
       (should (eq 'self-insert-command (key-binding "m")))
       (agent-shell-notes-tests--type "mn")
-      ;; The first typed character carries the request keymap on.
+      ;; Typed text stays in the body, where letters still insert.
       (should (eq 'self-insert-command (key-binding "m")))
       (agent-shell-notes-tests--type "m")
       (should (equal "mnm" (agent-shell-notes-tests--request)))

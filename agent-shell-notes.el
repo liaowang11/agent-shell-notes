@@ -1467,7 +1467,7 @@ in the body, so they type there.  Use it as a `menu-item' `:filter'
 to make your own review bindings do the same, for example:
 
   (keymap-set agent-shell-notes-review-mode-map \"j\"
-              \=`(menu-item \"\" agent-shell-notes-next-note
+              \\=`(menu-item \"\" agent-shell-notes-next-note
                           :filter ,(lambda (cmd)
                                      (unless (agent-shell-notes-in-request-p)
                                        cmd))))"
