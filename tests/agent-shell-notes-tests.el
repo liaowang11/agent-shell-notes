@@ -921,6 +921,78 @@ Note I is on line I, so the review order is 1 .. N."
         ;; A deleted note leaves no stale mark.
         (should-not agent-shell-notes--marks)))))
 
+;;;; Header line
+
+(defun agent-shell-notes-tests--header (&optional keep-properties)
+  "Return the review's header line as redisplay would compute it now.
+Batch `format-mode-line' returns \"\", so evaluate the `:eval' form.
+With KEEP-PROPERTIES, keep the text properties."
+  (should (eq :eval (car-safe header-line-format)))
+  (let ((header (eval (cadr header-line-format) t)))
+    (if keep-properties header (substring-no-properties header))))
+
+(ert-deftest agent-shell-notes-header-line-empty-review ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-review)
+    (with-current-buffer "*agent-shell-notes*"
+      (should (equal "Review │ No notes │ C-c C-c send  C-c C-e edit"
+                     (agent-shell-notes-tests--header))))))
+
+(ert-deftest agent-shell-notes-header-line-counts-omit-zeros-and-pluralize ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((a (agent-shell-notes-tests--file
+              (agent-shell-notes-tests--lines 5) "a.el"))
+          (b (agent-shell-notes-tests--file
+              (agent-shell-notes-tests--lines 5) "b.el")))
+      (agent-shell-notes-tests--capture a 1 nil "one")  ; id 1
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (should (equal "Review │ 1 note · 1 group │ C-c C-c send  C-c C-e edit"
+                       (agent-shell-notes-tests--header))))
+      (agent-shell-notes-tests--capture a 3 nil "three")  ; id 2
+      (agent-shell-notes-tests--capture b 2 nil "two")    ; id 3
+      (with-current-buffer "*agent-shell-notes*"
+        (should (equal "Review │ 3 notes · 2 groups │ C-c C-c send  C-c C-e edit"
+                       (agent-shell-notes-tests--header)))
+        (setf (alist-get :archived (nth 2 agent-shell-notes--notes))
+              "Claude Agent @ x")
+        (agent-shell-notes-tests--key "g")
+        (should (equal "Review │ 3 notes · 2 groups · 1 sent │ C-c C-c send  C-c C-e edit"
+                       (agent-shell-notes-tests--header)))))))
+
+(ert-deftest agent-shell-notes-header-line-follows-marks-without-redraw ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 3)
+    (let ((tick (buffer-chars-modified-tick)))
+      (agent-shell-notes-tests--goto-note 1)
+      (agent-shell-notes-tests--key "m")
+      (should (string-match-p "│ 3 notes · 1 group · 1 marked │"
+                              (agent-shell-notes-tests--header)))
+      (agent-shell-notes-tests--key "t")
+      (should (string-match-p "│ 3 notes · 1 group · 2 marked │"
+                              (agent-shell-notes-tests--header)))
+      (agent-shell-notes-tests--key "U")
+      (should (string-match-p "│ 3 notes · 1 group │"
+                              (agent-shell-notes-tests--header)))
+      ;; Marking left the text alone: no redraw happened.
+      (should (= tick (buffer-chars-modified-tick))))))
+
+(ert-deftest agent-shell-notes-header-line-switches-with-edit-mode ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 2)
+    (agent-shell-notes-tests--goto-note 1)
+    (agent-shell-notes-tests--key "m")
+    (should (eq 'agent-shell-notes-header-review
+                (get-text-property 0 'face (agent-shell-notes-tests--header t))))
+    (agent-shell-notes-tests--key "C-x C-q")
+    (should (equal "Edit │ 2 notes · 1 group · 1 marked │ C-c C-c save  C-c C-k revert"
+                   (agent-shell-notes-tests--header)))
+    (should (eq 'agent-shell-notes-header-edit
+                (get-text-property 0 'face (agent-shell-notes-tests--header t))))
+    (agent-shell-notes-tests--edit-key "C-c C-c")
+    (should (equal "Review │ 2 notes · 1 group · 1 marked │ C-c C-c send  C-c C-e edit"
+                   (agent-shell-notes-tests--header)))))
+
 ;;;; The request
 
 (defun agent-shell-notes-tests--request-start ()

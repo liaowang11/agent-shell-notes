@@ -1380,10 +1380,71 @@ The buffer is drawn from the note list; its text is read-only.
 \\{agent-shell-notes-review-mode-map}"
   (agent-shell-notes--markdown-setup)
   (add-to-invisibility-spec '(agent-shell-notes-quote . t))
-  (setq truncate-lines nil))
+  (setq truncate-lines nil)
+  ;; Recomputed on every redisplay, so it follows marks and edit mode
+  ;; without a redraw.
+  (setq header-line-format '(:eval (agent-shell-notes--header-line))))
 
 (set-keymap-parent agent-shell-notes-review-mode-map
                    (agent-shell-notes--markdown-map))
+
+;; The keys the header line and docstrings show for commands bound to
+;; several keys.
+(put 'agent-shell-notes-edit-mode :advertised-binding (kbd "C-c C-e"))
+(put 'agent-shell-notes-edit-commit :advertised-binding (kbd "C-c C-c"))
+
+(defface agent-shell-notes-header-review
+  '((t :inherit bold))
+  "Face of the `Review' label in the review's header line.")
+
+(defface agent-shell-notes-header-edit
+  '((t :inherit warning))
+  "Face of the `Edit' label in the review's header line.")
+
+(defun agent-shell-notes--count (n noun &optional plural)
+  "Return N followed by NOUN, or PLURAL (default NOUN + s) when N is not 1.
+Return nil when N is 0."
+  (unless (zerop n)
+    (format "%d %s" n (if (= n 1) noun (or plural (concat noun "s"))))))
+
+(defun agent-shell-notes--header-summary ()
+  "Return the review's note counts, for the header line."
+  (let ((notes agent-shell-notes--notes))
+    (if (null notes)
+        "No notes"
+      (string-join
+       (delq nil
+             (list (agent-shell-notes--count (length notes) "note")
+                   (agent-shell-notes--count
+                    (length (agent-shell-notes--groups)) "group")
+                   (agent-shell-notes--count
+                    (seq-count (lambda (note)
+                                 (memq (alist-get :id note)
+                                       agent-shell-notes--marks))
+                               notes)
+                    "marked" "marked")
+                   (agent-shell-notes--count
+                    (seq-count (lambda (note) (alist-get :archived note))
+                               notes)
+                    "sent" "sent")))
+       " · "))))
+
+(defun agent-shell-notes--header-line ()
+  "Return the review's header line: mode, note counts, key hints."
+  (let ((edit (bound-and-true-p agent-shell-notes-edit-mode)))
+    (concat
+     (if edit
+         (propertize "Edit" 'face 'agent-shell-notes-header-edit)
+       (propertize "Review" 'face 'agent-shell-notes-header-review))
+     " │ " (agent-shell-notes--header-summary) " │ "
+     (substitute-command-keys
+      (if edit
+          "\\<agent-shell-notes-edit-mode-map>\
+\\[agent-shell-notes-edit-commit] save  \
+\\[agent-shell-notes-edit-revert] revert"
+        "\\<agent-shell-notes-review-mode-map>\
+\\[agent-shell-notes-send] send  \
+\\[agent-shell-notes-edit-mode] edit")))))
 
 ;;;; Edit mode
 
@@ -1747,7 +1808,10 @@ Every window showing it stays on the note it showed."
   (setq agent-shell-notes--marks marked)
   (when-let* ((buffer (get-buffer agent-shell-notes--review-buffer-name)))
     (with-current-buffer buffer
-      (agent-shell-notes--apply-marks))))
+      (agent-shell-notes--apply-marks)
+      ;; The text is unchanged, so make sure the header line's counts
+      ;; are recomputed.
+      (force-mode-line-update))))
 
 (defun agent-shell-notes--ids-at-point ()
   "Return the ids of the notes the region touches, else the note at point.

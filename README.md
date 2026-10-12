@@ -184,7 +184,14 @@ Under evil the popup opens in insert state.
 ### The review
 
 `*agent-shell-notes*` groups notes by file, Dired directory, transcript turn
-or buffer. The `# Request` section at the end takes ordinary typing; its
+or buffer. The header line shows the mode (`Review` or `Edit`), how many
+notes, groups, marked and sent notes there are, and the main keys:
+
+```
+Review │ 3 notes · 2 groups · 1 marked │ C-c C-c send  C-c C-e edit
+```
+
+The `# Request` section at the end takes ordinary typing; its
 text follows the notes in the next send. Elsewhere the buffer is read-only
 and single keys act on notes:
 

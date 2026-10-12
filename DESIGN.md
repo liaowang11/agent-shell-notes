@@ -258,6 +258,19 @@ it is reached when the socket closes early
   archived note `agent-shell-notes-archived` above both, so it dims them
   too. The popup's location line works the same way. Every redraw starts
   with `remove-overlays`, so the overlays never pile up.
+- Header line: mode label, note counts, key hints, for example
+  `Edit │ 3 notes · 2 groups · 1 marked │ C-c C-c save  C-c C-k revert`.
+  The label is `Review` (`agent-shell-notes-header-review`, bold) or
+  `Edit` (`agent-shell-notes-header-edit`, inherits `warning`); these faces
+  are text properties, since font-lock never touches the header line.
+  Counts come from the note list: notes, groups, marked, sent (archived);
+  a zero count is left out, an empty review shows `No notes`. The hints
+  are `substitute-command-keys` against the review or edit map, with
+  `:advertised-binding` picking `C-c C-e` and `C-c C-c` among the commands'
+  several keys. `header-line-format` is an `:eval` form, so marking, which
+  never redraws, still updates it; `--set-marks` also forces a mode-line
+  update. In edit mode a note captured meanwhile is counted before the
+  buffer shows it (the review is not redrawn until edit mode ends).
 - Marks: `agent-shell-notes-mark-indicator` picks `fringe` (default; a
   margin `*` on a tty) or `background` (a face overlay on the whole note).
   Marks are overlays, never text.
@@ -329,7 +342,8 @@ stay read-only and fence the notes. Its local map,
 `agent-shell-notes-edit-mode-map`, replaces the review map, so letters
 insert in the note texts and in the request body alike. `C-c C-c` commits every changed text back to the notes and leaves
 edit mode; `C-c C-k` reverts and leaves. Emptying a text keeps the note as
-quote-only. The mode line shows `Edit`. Marks and other keys are inactive
+quote-only. The mode line shows `Edit`, and the header line's label
+turns to `Edit` with the edit keys (5.1). Marks and other keys are inactive
 while editing.
 
 ## 6. Send
