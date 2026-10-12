@@ -204,7 +204,11 @@ and single keys act on notes:
 | `g` | `agent-shell-notes-redraw` | Redraw. |
 | `q` | `quit-window` | Quit. |
 
-`C-c C-c` and `C-c C-r` also work from the request body.
+`C-c C-c` and `C-c C-r` also work from the request body. There the
+single keys, `RET` and `TAB` step aside, so they type (or, under evil,
+run evil's commands). `agent-shell-notes-in-request-p` tells whether
+point is in the body; use it as a `menu-item` `:filter` to give your own
+review bindings the same behavior.
 
 **Edit mode** makes the note texts writable, like `wdired-mode`; headings,
 locations and quotes stay read-only and the single keys above are off.
@@ -374,6 +378,18 @@ Evil's normal state shadows the review's single-letter keys. The package
 adds no evil bindings by design. Use Emacs state in the review (see the
 [Doom example](#example-doom-emacs)), or bind the commands in your evil
 config. The capture popup already opens in insert state.
+
+The request body works in any state: in normal state, `i` enters insert
+state there and `j`/`k` move as usual. To keep an evil binding of your
+own from firing in the body, wrap it like the package does:
+
+```elisp
+(evil-define-key* 'normal agent-shell-notes-review-mode-map
+  "j" `(menu-item "" agent-shell-notes-next-note
+                  :filter ,(lambda (cmd)
+                             (unless (agent-shell-notes-in-request-p)
+                               cmd))))
+```
 
 ### The session picker ignores "last target first". Why?
 

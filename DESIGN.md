@@ -187,8 +187,11 @@ and `agent-shell-notes-review-display-action` (default nil: whatever
 Major mode `agent-shell-notes-review-mode`, derived from `markdown-mode`.
 The buffer is writable, but every span outside the request body carries
 the `read-only` text property, so the single-letter keys in 5.2 act on
-notes while the request body takes ordinary typing: it carries a `keymap`
-text property whose map inherits from `markdown-mode-map`. Note commands
+notes while the request body takes ordinary typing. The body carries no
+`keymap` text property: such a property outranks every other map, evil's
+state maps included, so under evil normal state it left every key in the
+body dead. Instead the review map's printing keys, `RET` and `TAB` are
+conditional bindings (5.2) that step aside in the body. Note commands
 (`n`, `p`, `m`, ...) invoked with point in the request body `user-error`.
 Redrawn from the note list on every change (the request body is kept).
 Layout:
@@ -263,12 +266,24 @@ it is reached when the socket closes early
 `C-c C-c` or `w` with no marks and point in the request section or on no
 note: `user-error "No note at point"`.
 
+Every printing key above, plus `RET` and `TAB`, is bound as a `menu-item`
+whose `:filter` returns nil when point is in the request body. The key
+then falls through to the next active map: an evil state map, else the
+global map, so letters insert. A void binding also skips the review map's
+parent, so `RET` and `TAB` return `markdown-mode-map`'s binding in the
+body instead (newline and cycling, as in any Markdown buffer). `C-c C-c`,
+`C-c C-r`, `C-c C-e`, `C-x C-q` and `mouse-1` stay plain bindings, so they
+work from the body too. The public predicate
+`agent-shell-notes-in-request-p` is the filter's test; users apply it to
+their own review bindings (an evil `j`, say) the same way.
+
 ### 5.3 Edit mode
 
 `agent-shell-notes-edit-mode`, a minor mode like wdired: it lifts the
-`read-only` property from the note texts (and gives them the same
-`keymap` property as the request body); headings, locations and quotes
-stay read-only and fence the notes. `C-c C-c` commits every changed text back to the notes and leaves
+`read-only` property from the note texts; headings, locations and quotes
+stay read-only and fence the notes. Its local map,
+`agent-shell-notes-edit-mode-map`, replaces the review map, so letters
+insert in the note texts and in the request body alike. `C-c C-c` commits every changed text back to the notes and leaves
 edit mode; `C-c C-k` reverts and leaves. Emptying a text keeps the note as
 quote-only. The mode line shows `Edit`. Marks and other keys are inactive
 while editing.
@@ -575,6 +590,9 @@ Commands: `agent-shell-notes-capture`, `-review`, `-send-all`,
 `-restore-last`, `-set-style`, `-set-after-send`, plus the review and popup
 keys in 5.2, 5.3 and 4.4.
 
+Functions: `agent-shell-notes-in-request-p`, the request-body test of the
+review's key filter (5.2).
+
 Options: `agent-shell-notes-sources`, `-style`, `-after-send`,
 `-mark-indicator`, `-fence-languages`, `-capture-display-action`,
 `-review-display-action`, `-client`,
@@ -619,8 +637,9 @@ Makefile variables listed once and shared by local runs and CI
   everything, request clearing, restore-last for each mode, a failing
   `:send` changing nothing, `send-all` with no unarchived notes.
 - **Popup**: capture, insert, save or abort; quote-only save, one popup at
-  a time, window configuration restored. The evil insert-state test skips
-  when evil is not on the load path.
+  a time, window configuration restored. The evil tests (popup insert
+  state; `i` and `j` in the request body under normal state) skip when
+  evil is not on the load path.
 - **Live**: `make live-check`, by hand, outside `check` and CI. Starts a
   real claude-agent-acp session through agent-shell, sends a two-note
   review with `C-c C-c` and asserts the transcript's user prompt equals the
