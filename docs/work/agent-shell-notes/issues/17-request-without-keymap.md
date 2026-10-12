@@ -1,6 +1,6 @@
 ---
 title: Request body without its own keymap
-status: open
+status: closed
 labels: [ready-for-agent]
 assignee: claude
 blocked-by: []
