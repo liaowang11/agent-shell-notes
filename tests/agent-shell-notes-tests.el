@@ -2697,7 +2697,8 @@ Return the saved note."
 (ert-deftest agent-shell-notes-capture-dired-file-at-point ()
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
-           (dir (buffer-local-value 'default-directory buf))
+           (dir (expand-file-name
+                 (buffer-local-value 'default-directory buf)))
            (note (agent-shell-notes-tests--dired-capture
                   buf (lambda () (dired-goto-file (expand-file-name "b.el" dir)))
                   "look at b")))
@@ -2712,7 +2713,8 @@ Return the saved note."
 (ert-deftest agent-shell-notes-capture-dired-marked-files ()
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
-           (dir (buffer-local-value 'default-directory buf))
+           (dir (expand-file-name
+                 (buffer-local-value 'default-directory buf)))
            (note (agent-shell-notes-tests--dired-capture
                   buf (lambda ()
                         (dolist (name '("a.el" "c.el"))
@@ -2728,7 +2730,8 @@ Return the saved note."
   ;; of c.el's line: a.el and b.el, even with c.el marked.
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
-           (dir (buffer-local-value 'default-directory buf))
+           (dir (expand-file-name
+                 (buffer-local-value 'default-directory buf)))
            (note (agent-shell-notes-tests--dired-capture
                   buf (lambda ()
                         (dired-goto-file (expand-file-name "c.el" dir))
@@ -2762,7 +2765,8 @@ Return the saved note."
 (ert-deftest agent-shell-notes-review-groups-dired-notes-by-directory ()
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
-           (dir (buffer-local-value 'default-directory buf))
+           (dir (expand-file-name
+                 (buffer-local-value 'default-directory buf)))
            (file (agent-shell-notes-tests--file
                   (agent-shell-notes-tests--lines 3)))
            (goto (lambda (name)
@@ -2829,7 +2833,8 @@ Its `default-directory' is a temporary directory outside any project."
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--buffer
                  "*asn-help*" #'help-mode (agent-shell-notes-tests--lines 5)))
-           (dir (buffer-local-value 'default-directory buf))
+           (dir (expand-file-name
+                 (buffer-local-value 'default-directory buf)))
            (note (agent-shell-notes-tests--capture buf 2 4 "two lines"))
            (one (agent-shell-notes-tests--capture buf 5)))
       (should (eq 'buffer (alist-get :source note)))
@@ -3042,7 +3047,8 @@ WHERE is `heading' for the heading of ID's group."
 (ert-deftest agent-shell-notes-jump-dired-live-and-dead ()
   (agent-shell-notes-tests--with-clean-state
     (let* ((buf (agent-shell-notes-tests--dired '("a.el" "b.el" "c.el")))
-           (dir (buffer-local-value 'default-directory buf))
+           (dir (expand-file-name
+                 (buffer-local-value 'default-directory buf)))
            (note (agent-shell-notes-tests--dired-capture
                   buf (lambda ()
                         (dired-mark-files-regexp "\\`[bc]\\.el\\'"))
@@ -3058,7 +3064,7 @@ WHERE is `heading' for the heading of ID's group."
         (agent-shell-notes-tests--jump-from (alist-get :id note))
         (push (current-buffer) agent-shell-notes-tests--shells)
         (should (derived-mode-p 'dired-mode))
-        (should (equal dir default-directory))
+        (should (equal dir (expand-file-name default-directory)))
         (should (eq (current-buffer) (window-buffer (selected-window))))
         (should (equal (expand-file-name "b.el" dir)
                        (dired-get-filename nil t)))))))
