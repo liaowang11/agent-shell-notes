@@ -2045,6 +2045,76 @@ property's."
         (should (= 1 (length (agent-shell-notes-tests--face-overlays
                               'agent-shell-notes-location))))))))
 
+;; markdown-mode lists `rear-nonsticky' in `font-lock-extra-managed-props',
+;; so its font-lock strips that property from every fontified character.
+
+(defun agent-shell-notes-tests--type-fontified (pos string)
+  "Fontify, then type STRING at POS; return the text typed there."
+  (agent-shell-notes-tests--fontify)
+  (goto-char pos)
+  (agent-shell-notes-tests--type string)
+  (buffer-substring-no-properties pos (point)))
+
+(ert-deftest agent-shell-notes-review-request-takes-typing-after-font-lock ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 1)
+    (let ((start (agent-shell-notes-tests--request-start)))
+      ;; Empty body, then the start and the end of a non-empty one.
+      (should (equal "fix" (agent-shell-notes-tests--type-fontified
+                            start "fix")))
+      (should (equal "now " (agent-shell-notes-tests--type-fontified
+                             start "now ")))
+      (should (equal "!" (agent-shell-notes-tests--type-fontified
+                          (point-max) "!")))
+      (should (equal "now fix!" (agent-shell-notes-tests--request)))
+      ;; The heading, the location and the quote stay read-only.
+      (should-not (agent-shell-notes-tests--writable-p (1- start)))
+      (should-not (agent-shell-notes-tests--writable-p (point-min)))
+      (should-not (agent-shell-notes-tests--writable-p
+                   (1+ (agent-shell-notes-tests--search "^\\*\\*line"))))
+      (should-not (agent-shell-notes-tests--writable-p
+                   (1+ (agent-shell-notes-tests--search "^line 1$")))))))
+
+(ert-deftest agent-shell-notes-capture-note-area-takes-typing-after-font-lock ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 3))))
+      (agent-shell-notes-tests--select buf 2)
+      (agent-shell-notes-capture)
+      (with-current-buffer "*agent-shell-notes capture*"
+        (let ((start (point-max)))
+          (should (equal "hoist" (agent-shell-notes-tests--type-fontified
+                                  start "hoist")))
+          (should (equal "do " (agent-shell-notes-tests--type-fontified
+                                start "do ")))
+          (should (equal "do hoist" (buffer-substring-no-properties
+                                     start (point-max))))
+          (should-not (agent-shell-notes-tests--writable-p (1- start)))
+          (should-not (agent-shell-notes-tests--writable-p (point-min))))))))
+
+(ert-deftest agent-shell-notes-edit-mode-texts-take-typing-after-font-lock ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 5))))
+      (agent-shell-notes-tests--capture buf 2 nil "hoist it")  ; id 1
+      (agent-shell-notes-tests--capture buf 4 nil "")          ; id 2
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--key "C-x C-q")
+        (should (equal "do " (agent-shell-notes-tests--type-fontified
+                              (agent-shell-notes-tests--search "^hoist it$")
+                              "do ")))
+        ;; The empty text sits right after the second quote's fence.
+        (should (equal "new" (agent-shell-notes-tests--type-fontified
+                              (+ (agent-shell-notes-tests--search "^line 4$")
+                                 (length "line 4\n```\n"))
+                              "new")))
+        (should-not (agent-shell-notes-tests--writable-p
+                     (1+ (agent-shell-notes-tests--search "^\\*\\*line 4"))))
+        (agent-shell-notes-tests--edit-key "C-c C-c")
+        (should (equal "do hoist it" (agent-shell-notes-tests--note-text 1)))
+        (should (equal "new" (agent-shell-notes-tests--note-text 2)))))))
+
 ;;;; The Markdown parent
 
 ;; The parent is chosen when the package loads, so one run of the suite

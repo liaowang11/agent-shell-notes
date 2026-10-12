@@ -264,6 +264,13 @@ it is reached when the socket closes early
   Marks are overlays, never text.
 - `# Request` is the last section. Its body is always editable (no edit
   mode needed; see the mechanism above). Empty means notes only.
+- Writable regions (the request body, the popup's note area, edit-mode
+  note texts) open after read-only text through the character before
+  them, which must not pass `read-only` on. Its text property is
+  `agent-shell-notes-rear-nonsticky`, an alias of `rear-nonsticky` in
+  `char-property-alias-alist`: markdown-mode's font-lock strips
+  `rear-nonsticky` and markdown-ts-mode's strips `category`, but neither
+  touches the package's own property.
 - Every note's extent is recorded as text properties
   (`agent-shell-notes-id` on the whole note, `agent-shell-notes-field` on
   `location`, `quote`, `text`) so keys, marks and edit mode know the

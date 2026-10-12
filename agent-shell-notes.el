@@ -102,9 +102,31 @@ buffer into `text-mode'."
   "Adjust the Markdown parent for the review and the popup.
 markdown-ts-mode turns on a minor mode whose map takes `TAB' and
 `RET' inside code blocks; the quotes are read-only code blocks whose
-`TAB' folds, so turn it off."
+`TAB' folds, so turn it off.  Make `agent-shell-notes-rear-nonsticky'
+stand in for `rear-nonsticky' (see `agent-shell-notes--open-after')."
   (when (bound-and-true-p markdown-ts-code-block-context-mode)
-    (markdown-ts-code-block-context-mode -1)))
+    (markdown-ts-code-block-context-mode -1))
+  (setq-local char-property-alias-alist
+              (cons (cons 'rear-nonsticky
+                          (cons 'agent-shell-notes-rear-nonsticky
+                                (alist-get 'rear-nonsticky
+                                           char-property-alias-alist)))
+                    char-property-alias-alist)))
+
+;; A writable region after read-only text needs the character before it
+;; to pass `read-only' on to nothing.  A `rear-nonsticky' text property
+;; would not last: markdown-mode lists it in
+;; `font-lock-extra-managed-props', so its font-lock strips it from every
+;; character it fontifies.  markdown-ts-mode strips `category' the same
+;; way.  Emacs reads a property a character lacks off its aliases in
+;; `char-property-alias-alist', and no font-lock manages the package's
+;; own property.
+
+(defun agent-shell-notes--open-after (pos)
+  "Make text inserted right after the character at POS writable.
+The inserted text inherits neither `read-only' nor the property."
+  (put-text-property pos (1+ pos) 'agent-shell-notes-rear-nonsticky
+                     '(read-only agent-shell-notes-rear-nonsticky)))
 
 (defface agent-shell-notes-location
   '((t :inherit font-lock-comment-face))
@@ -1230,7 +1252,7 @@ The location and quote at the top are read-only; the note goes below.
   (agent-shell-notes--insert-quote note)
   (insert "\n")
   (add-text-properties (point-min) (point) '(read-only t front-sticky t))
-  (put-text-property (1- (point)) (point) 'rear-nonsticky '(read-only)))
+  (agent-shell-notes--open-after (1- (point))))
 
 ;;;###autoload
 (defun agent-shell-notes-capture ()
@@ -1408,7 +1430,7 @@ stays read-only and ends the text."
         (mapcar
          (pcase-lambda (`(,id ,beg ,end))
            (remove-list-of-text-properties beg end '(read-only))
-           (put-text-property (1- beg) beg 'rear-nonsticky '(read-only))
+           (agent-shell-notes--open-after (1- beg))
            (list id (copy-marker beg) (copy-marker end t)))
          agent-shell-notes--edit-slots)))
 
@@ -1584,9 +1606,8 @@ Note commands call this first: the body holds no note."
 The newline before the body passes the body's properties on but not
 `read-only', so text typed into an empty body is writable."
   (insert (propertize "# Request\n\n" 'read-only t))
-  (add-text-properties (1- (point)) (point)
-                       '(rear-nonsticky (read-only)
-                         agent-shell-notes-field request))
+  (put-text-property (1- (point)) (point) 'agent-shell-notes-field 'request)
+  (agent-shell-notes--open-after (1- (point)))
   (setq agent-shell-notes--request-start (point-marker))
   (insert (propertize request 'agent-shell-notes-field 'request)))
 
