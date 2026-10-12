@@ -1224,28 +1224,43 @@ on a text terminal); `background' gives the whole note the face
   "Ids of the marked notes.
 Kept apart from the review buffer, which is redrawn from scratch.")
 
+(defun agent-shell-notes--outside-request (command &optional key)
+  "Return a key binding that runs COMMAND except in the request body.
+In the body the binding is void, so the key falls through to the next
+active map: an evil state map, else the global map (for a printing
+key, `self-insert-command').  A void binding skips the parent
+`markdown-mode-map' too, so with KEY the body gets KEY's binding there
+instead, if any."
+  `(menu-item "" ,command
+              :filter ,(lambda (cmd)
+                         (cond ((not (agent-shell-notes-in-request-p)) cmd)
+                               (key (keymap-lookup markdown-mode-map key))))))
+
 (defvar-keymap agent-shell-notes-review-mode-map
-  :doc "Keymap for `agent-shell-notes-review-mode'."
-  "n" #'agent-shell-notes-next-note
-  "p" #'agent-shell-notes-previous-note
-  "m" #'agent-shell-notes-mark
-  "u" #'agent-shell-notes-unmark
-  "t" #'agent-shell-notes-toggle-marks
-  "U" #'agent-shell-notes-unmark-all
-  "TAB" #'agent-shell-notes-toggle-quote
-  "g" #'agent-shell-notes-redraw
-  "k" #'agent-shell-notes-delete
-  "D" #'agent-shell-notes-delete-marked
-  "x" #'agent-shell-notes-purge-archived
-  "e" #'agent-shell-notes-edit
+  :doc "Keymap for `agent-shell-notes-review-mode'.
+The printing keys, `RET' and `TAB' are void in the request body, where
+they type; see `agent-shell-notes-in-request-p'."
+  "n" (agent-shell-notes--outside-request #'agent-shell-notes-next-note)
+  "p" (agent-shell-notes--outside-request #'agent-shell-notes-previous-note)
+  "m" (agent-shell-notes--outside-request #'agent-shell-notes-mark)
+  "u" (agent-shell-notes--outside-request #'agent-shell-notes-unmark)
+  "t" (agent-shell-notes--outside-request #'agent-shell-notes-toggle-marks)
+  "U" (agent-shell-notes--outside-request #'agent-shell-notes-unmark-all)
+  "TAB" (agent-shell-notes--outside-request
+         #'agent-shell-notes-toggle-quote "TAB")
+  "g" (agent-shell-notes--outside-request #'agent-shell-notes-redraw)
+  "k" (agent-shell-notes--outside-request #'agent-shell-notes-delete)
+  "D" (agent-shell-notes--outside-request #'agent-shell-notes-delete-marked)
+  "x" (agent-shell-notes--outside-request #'agent-shell-notes-purge-archived)
+  "e" (agent-shell-notes--outside-request #'agent-shell-notes-edit)
   "C-c C-c" #'agent-shell-notes-send
-  "w" #'agent-shell-notes-copy
+  "w" (agent-shell-notes--outside-request #'agent-shell-notes-copy)
   "C-c C-r" #'agent-shell-notes-restore-last
   "C-c C-e" #'agent-shell-notes-edit-mode
   "C-x C-q" #'agent-shell-notes-edit-mode
-  "RET" #'agent-shell-notes-jump
+  "RET" (agent-shell-notes--outside-request #'agent-shell-notes-jump "RET")
   "<mouse-1>" #'agent-shell-notes-jump
-  "q" #'quit-window)
+  "q" (agent-shell-notes--outside-request #'quit-window))
 
 (define-derived-mode agent-shell-notes-review-mode markdown-mode "Notes"
   "Major mode of the review, where the collected notes are shown.
@@ -1441,30 +1456,28 @@ group by line."
     (when (memq id agent-shell-notes--marks)
       (agent-shell-notes--show-mark id beg (point)))))
 
-(defvar agent-shell-notes--request-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map markdown-mode-map)
-    ;; Keys a text-property map leaves unbound fall through to the
-    ;; review's map, so the printing characters must insert here.
-    (dotimes (i 95)
-      (let ((key (string (+ 32 i))))
-        (unless (lookup-key markdown-mode-map key)
-          (keymap-set map (key-description key) #'self-insert-command))))
-    (keymap-set map "C-c C-c" #'agent-shell-notes-send)
-    map)
-  "Keymap of the request body in the review.
-It is the body's `keymap' text property, so it shadows the review's
-note keys there and letters insert.")
-
 (defvar-local agent-shell-notes--request-start nil
   "Marker at the start of the request body in the review.
 The body runs from here to the end of the buffer.")
 
+(defun agent-shell-notes-in-request-p ()
+  "Return non-nil when point is in the request body of the review.
+The review map's printing keys, `RET' and `TAB' test this and are void
+in the body, so they type there.  Use it as a `menu-item' `:filter'
+to make your own review bindings do the same, for example:
+
+  (keymap-set agent-shell-notes-review-mode-map \"j\"
+              \=`(menu-item \"\" agent-shell-notes-next-note
+                          :filter ,(lambda (cmd)
+                                     (unless (agent-shell-notes-in-request-p)
+                                       cmd))))"
+  (and agent-shell-notes--request-start
+       (>= (point) agent-shell-notes--request-start)))
+
 (defun agent-shell-notes--refuse-in-request ()
   "Signal `user-error' when point is in the request body of the review.
 Note commands call this first: the body holds no note."
-  (when (and agent-shell-notes--request-start
-             (>= (point) agent-shell-notes--request-start))
+  (when (agent-shell-notes-in-request-p)
     (user-error "Point is in the request")))
 
 (defun agent-shell-notes--request-text ()
@@ -1479,17 +1492,13 @@ Note commands call this first: the body holds no note."
 (defun agent-shell-notes--insert-request (request)
   "Insert the read-only request heading, then the writable REQUEST body.
 The newline before the body passes the body's properties on but not
-`read-only', so text typed into an empty body is writable and takes
-the request keymap.  Edit mode leaves the keymap off, so its own keys
-work in the body too."
-  (let ((props (append (list 'agent-shell-notes-field 'request)
-                       (unless agent-shell-notes-edit-mode
-                         (list 'keymap agent-shell-notes--request-map)))))
-    (insert (propertize "# Request\n\n" 'read-only t))
-    (add-text-properties (1- (point)) (point)
-                         (append '(rear-nonsticky (read-only)) props))
-    (setq agent-shell-notes--request-start (point-marker))
-    (insert (apply #'propertize request props))))
+`read-only', so text typed into an empty body is writable."
+  (insert (propertize "# Request\n\n" 'read-only t))
+  (add-text-properties (1- (point)) (point)
+                       '(rear-nonsticky (read-only)
+                         agent-shell-notes-field request))
+  (setq agent-shell-notes--request-start (point-marker))
+  (insert (propertize request 'agent-shell-notes-field 'request)))
 
 (defun agent-shell-notes--review-draw ()
   "Redraw the current review buffer from the note list.

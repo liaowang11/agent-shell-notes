@@ -266,6 +266,7 @@ Return the saved note."
 
 (defvar evil-state)
 (declare-function evil-mode "evil-core" (&optional arg))
+(declare-function evil-normal-state "evil-states" (&optional arg))
 
 (ert-deftest agent-shell-notes-capture-popup-opens-in-evil-insert-state ()
   (skip-unless (require 'evil nil t))
@@ -985,11 +986,85 @@ Note I is on line I, so the review order is 1 .. N."
       (agent-shell-notes-tests--goto-note 1)
       (should (eq 'agent-shell-notes-mark (key-binding "m"))))))
 
+(defun agent-shell-notes-tests--review-printable-keys ()
+  "Return the printable keys the review map binds, as key strings."
+  (let (keys)
+    (map-keymap (lambda (event _binding)
+                  (when (and (integerp event) (<= 32 event 126))
+                    (push (string event) keys)))
+                agent-shell-notes-review-mode-map)
+    keys))
+
+(ert-deftest agent-shell-notes-review-request-body-has-no-keymap ()
+  ;; §5.1: the body carries no `keymap' property, so a key the review
+  ;; map binds falls through to the next map there.
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 1)
+    (let ((start (agent-shell-notes-tests--request-start))
+          (keys (agent-shell-notes-tests--review-printable-keys)))
+      (should (member "m" keys))
+      (goto-char start)
+      (agent-shell-notes-tests--type "fix")
+      (should-not (text-property-not-all (1- start) (point-max) 'keymap nil))
+      (should-not (boundp 'agent-shell-notes--request-map))
+      (dolist (pos (list start (point-max)))
+        (goto-char pos)
+        (dolist (key keys)
+          (should (equal (list key (lookup-key global-map key))
+                         (list key (key-binding key)))))
+        ;; RET and TAB keep markdown-mode's commands, as before.
+        (should (eq (lookup-key markdown-mode-map (kbd "RET"))
+                    (key-binding (kbd "RET"))))
+        (should (eq (lookup-key markdown-mode-map (kbd "TAB"))
+                    (key-binding (kbd "TAB"))))
+        (should (eq 'agent-shell-notes-send (key-binding (kbd "C-c C-c"))))
+        (should (eq 'agent-shell-notes-restore-last
+                    (key-binding (kbd "C-c C-r")))))
+      (agent-shell-notes-tests--goto-note 1)
+      (should (eq 'agent-shell-notes-next-note (key-binding "n")))
+      (should (eq 'agent-shell-notes-jump (key-binding (kbd "RET"))))
+      (should (eq 'agent-shell-notes-toggle-quote (key-binding (kbd "TAB")))))))
+
+(ert-deftest agent-shell-notes-in-request-p-tells-the-request-body ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 1)
+    (let ((start (agent-shell-notes-tests--request-start)))
+      (goto-char start)
+      (should (agent-shell-notes-in-request-p))
+      (agent-shell-notes-tests--type "fix")
+      (should (agent-shell-notes-in-request-p))
+      (goto-char (1- start))
+      (should-not (agent-shell-notes-in-request-p))
+      (agent-shell-notes-tests--goto-note 1)
+      (should-not (agent-shell-notes-in-request-p))
+      (with-temp-buffer
+        (should-not (agent-shell-notes-in-request-p))))))
+
+(ert-deftest agent-shell-notes-review-request-body-under-evil-normal-state ()
+  ;; A text-property keymap would outrank evil and leave every key dead.
+  (skip-unless (require 'evil nil t))
+  (agent-shell-notes-tests--with-clean-state
+    (let ((was-on (bound-and-true-p evil-mode)))
+      (unwind-protect
+          (progn
+            (agent-shell-notes-tests--review-with 1)
+            (goto-char (agent-shell-notes-tests--request-start))
+            (agent-shell-notes-tests--type "fix")
+            (backward-char)
+            (evil-mode 1)
+            (evil-normal-state)
+            (should (eq 'normal evil-state))
+            (should (eq 'evil-insert (key-binding "i")))
+            (should (eq 'evil-next-line (key-binding "j"))))
+        (unless was-on
+          (evil-mode -1))))))
+
 (ert-deftest agent-shell-notes-review-request-survives-redraws ()
   (agent-shell-notes-tests--with-clean-state
     (let ((buf (agent-shell-notes-tests--review-with 1)))
       (goto-char (agent-shell-notes-tests--request-start))
       (agent-shell-notes-tests--type "fix it")
+      (agent-shell-notes-tests--goto-note 1)
       (agent-shell-notes-tests--key "g")
       (should (equal "fix it" (agent-shell-notes-tests--request)))
       (agent-shell-notes-tests--capture buf 2 nil "two")
@@ -1433,12 +1508,14 @@ The boundary must be stubbed by the caller."
                  (lambda (_) (error "Asked")))
                 ((symbol-function 'y-or-n-p)
                  (lambda (_) (error "Asked"))))
+        (agent-shell-notes-tests--goto-note 2)
         (agent-shell-notes-tests--key "x"))
       (should (equal '(2) (agent-shell-notes-tests--ids)))
       (should (equal '(2) (agent-shell-notes-tests--runs
                            'agent-shell-notes-id)))
       (should (equal '(2) agent-shell-notes--marks))
       ;; Nothing archived: harmless.
+      (agent-shell-notes-tests--goto-note 2)
       (agent-shell-notes-tests--key "x")
       (should (equal '(2) (agent-shell-notes-tests--ids))))))
 
@@ -1528,6 +1605,7 @@ The boundary must be stubbed by the caller."
           (should-error (agent-shell-notes-send)))
         (should (equal before (agent-shell-notes-tests--review-state))))
       ;; `w' stores nothing either.
+      (agent-shell-notes-tests--goto-note 2)
       (agent-shell-notes-tests--key "w")
       ;; The store still holds the first send.
       (agent-shell-notes-tests--key "C-c C-r")
