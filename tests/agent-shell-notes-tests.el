@@ -2144,6 +2144,27 @@ minor modes that follow point are up to date."
     (should (eq markdown-ts-mode-map
                 (keymap-parent agent-shell-notes-review-mode-map)))))
 
+(ert-deftest agent-shell-notes-markdown-mode-option-applies-on-reload ()
+  ;; §2: a change of the option takes effect when the package reloads.
+  (skip-unless (agent-shell-notes-tests--ts-p))
+  (cl-flet ((parent-of-new-review ()
+              (with-temp-buffer
+                (agent-shell-notes-review-mode)
+                (list agent-shell-notes--markdown-parent
+                      (and (derived-mode-p 'markdown-ts-mode) t)
+                      (eq (keymap-parent agent-shell-notes-review-mode-map)
+                          markdown-ts-mode-map)))))
+    (unwind-protect
+        (progn
+          (setq agent-shell-notes-markdown-mode 'markdown-mode)
+          (load "agent-shell-notes" nil t)
+          (should (equal '(markdown-mode nil nil) (parent-of-new-review)))
+          (setq agent-shell-notes-markdown-mode 'auto)
+          (load "agent-shell-notes" nil t)
+          (should (equal '(markdown-ts-mode t t) (parent-of-new-review))))
+      (setq agent-shell-notes-markdown-mode 'auto)
+      (load "agent-shell-notes" nil t))))
+
 (ert-deftest agent-shell-notes-markdown-ts-heading-tab-folds-the-group ()
   ;; markdown-ts-mode has no `markdown-shifttab'; its outline cycling on
   ;; headings is what folds groups instead.

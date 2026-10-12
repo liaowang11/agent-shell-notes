@@ -46,7 +46,7 @@ tree-sitter grammars are installed.  Otherwise it takes
 when it falls back.
 
 The choice is made when the package loads.  Set this before that;
-after a change, reload the package (\[load-library] agent-shell-notes)
+after a change, reload the package (\\[load-library] agent-shell-notes)
 and reopen the review and the popup."
   :type '(choice (const :tag "markdown-ts-mode when it can run" auto)
                  (const :tag "markdown-ts-mode, warn on fallback"
@@ -84,6 +84,11 @@ buffer into `text-mode'."
 ;; included.
 (defalias 'agent-shell-notes--markdown-mode agent-shell-notes--markdown-parent
   "The Markdown mode in `agent-shell-notes--markdown-parent'.")
+
+;; Emacs 30 and later cache a mode's parents, the alias's included; a
+;; reload with another choice must drop the stale chain.
+(when (fboundp 'derived-mode-set-parent)
+  (derived-mode-set-parent 'agent-shell-notes--markdown-mode nil))
 
 (defun agent-shell-notes--markdown-map ()
   "Return the keymap of `agent-shell-notes--markdown-parent'."
