@@ -1,6 +1,6 @@
 ---
 title: Location and tag faces survive font-lock
-status: open
+status: closed
 labels: [ready-for-agent]
 assignee: claude
 blocked-by: []

@@ -1,6 +1,6 @@
 ---
 title: Prefer markdown-ts-mode, fall back to markdown-mode
-status: open
+status: closed
 labels: [ready-for-agent]
 assignee: claude
 blocked-by: [018]
