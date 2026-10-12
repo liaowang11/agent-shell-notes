@@ -1,6 +1,6 @@
 ---
 title: Typing survives markdown-mode font-lock
-status: open
+status: closed
 labels: [ready-for-agent]
 assignee: claude
 blocked-by: []
