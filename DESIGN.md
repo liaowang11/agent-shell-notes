@@ -231,6 +231,13 @@ it is reached when the socket closes early
 - The quote is folded after 6 lines (invisible overlay with `...`), `TAB`
   on a note toggles it.
 - Archived notes are dimmed (`agent-shell-notes-archived` face).
+- The package faces are overlays, not `face` text properties: font-lock
+  from the Markdown parent repaints text properties (`**line 7**` turned
+  `markdown-bold-face`). The location line gets
+  `agent-shell-notes-location`, each tag `agent-shell-notes-tag`, an
+  archived note `agent-shell-notes-archived` above both, so it dims them
+  too. The popup's location line works the same way. Every redraw starts
+  with `remove-overlays`, so the overlays never pile up.
 - Marks: `agent-shell-notes-mark-indicator` picks `fringe` (default; a
   margin `*` on a tty) or `background` (a face overlay on the whole note).
   Marks are overlays, never text.
@@ -598,7 +605,8 @@ Options: `agent-shell-notes-sources`, `-style`, `-after-send`,
 `-review-display-action`, `-client`,
 `-agent-shell-disposition`.
 
-Faces: `agent-shell-notes-location`, `-tag`, `-archived`, `-mark`.
+Faces: `agent-shell-notes-location`, `-tag`, `-archived`, `-mark`, all
+applied through overlays (5.1).
 
 ## 11. Tests and CI
 
