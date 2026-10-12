@@ -2,7 +2,7 @@
 title: Location and tag faces survive font-lock
 status: open
 labels: [ready-for-agent]
-assignee:
+assignee: claude
 blocked-by: []
 ---
 
