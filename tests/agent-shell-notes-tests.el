@@ -1012,10 +1012,12 @@ Note I is on line I, so the review order is 1 .. N."
         (dolist (key keys)
           (should (equal (list key (lookup-key global-map key))
                          (list key (key-binding key)))))
-        ;; RET and TAB keep markdown-mode's commands, as before.
-        (should (eq (lookup-key markdown-mode-map (kbd "RET"))
+        ;; RET and TAB keep the Markdown parent's commands, as before.
+        (should (eq (lookup-key (agent-shell-notes-tests--parent-map)
+                                (kbd "RET"))
                     (key-binding (kbd "RET"))))
-        (should (eq (lookup-key markdown-mode-map (kbd "TAB"))
+        (should (eq (lookup-key (agent-shell-notes-tests--parent-map)
+                                (kbd "TAB"))
                     (key-binding (kbd "TAB"))))
         (should (eq 'agent-shell-notes-send (key-binding (kbd "C-c C-c"))))
         (should (eq 'agent-shell-notes-restore-last
@@ -2042,6 +2044,165 @@ property's."
         (should-not (get-char-property (line-end-position) 'face))
         (should (= 1 (length (agent-shell-notes-tests--face-overlays
                               'agent-shell-notes-location))))))))
+
+;;;; The Markdown parent
+
+;; The parent is chosen when the package loads, so one run of the suite
+;; covers one parent: `make test' the markdown-mode fallback, `make
+;; test-ts' markdown-ts-mode with the grammars on the load path.
+
+(declare-function treesit-ready-p "treesit" (language &optional quiet))
+
+(defun agent-shell-notes-tests--ts-p ()
+  "Non-nil when this Emacs has markdown-ts-mode and both its grammars."
+  (and (require 'markdown-ts-mode nil t)
+       (treesit-ready-p '(markdown markdown-inline) t)))
+
+(defun agent-shell-notes-tests--parent ()
+  "Return the Markdown mode the package should derive from in this run."
+  (if (agent-shell-notes-tests--ts-p) 'markdown-ts-mode 'markdown-mode))
+
+(defun agent-shell-notes-tests--parent-map ()
+  "Return the keymap of `agent-shell-notes-tests--parent'."
+  (symbol-value (intern (format "%s-map" (agent-shell-notes-tests--parent)))))
+
+(defun agent-shell-notes-tests--press (key)
+  "Press KEY at point as the command loop would, hooks included.
+The post-command hook of the command that moved point runs first, so
+minor modes that follow point are up to date."
+  (run-hooks 'post-command-hook)
+  (let ((this-command (key-binding (kbd key) t)))
+    (should (commandp this-command))
+    (run-hooks 'pre-command-hook)
+    (call-interactively this-command)
+    (run-hooks 'post-command-hook)))
+
+(ert-deftest agent-shell-notes-markdown-mode-option-picks-the-parent ()
+  ;; §2: `auto' takes markdown-ts-mode when it can run, else
+  ;; markdown-mode; `markdown-mode' never tries it; `markdown-ts-mode'
+  ;; falls back with a warning when it cannot run.
+  (pcase-dolist (`(,option ,ready ,parent ,warns)
+                 '((auto t markdown-ts-mode nil)
+                   (auto nil markdown-mode nil)
+                   (markdown-ts-mode t markdown-ts-mode nil)
+                   (markdown-ts-mode nil markdown-mode t)
+                   (markdown-mode t markdown-mode nil)
+                   (markdown-mode nil markdown-mode nil)))
+    (let ((agent-shell-notes-markdown-mode option)
+          (warned nil))
+      (cl-letf (((symbol-function 'agent-shell-notes--markdown-ts-ready-p)
+                 (lambda () ready))
+                ((symbol-function 'display-warning)
+                 (lambda (&rest _) (setq warned t))))
+        (should (equal (list option ready parent warns)
+                       (list option ready
+                             (agent-shell-notes--choose-markdown-mode)
+                             warned)))))))
+
+(ert-deftest agent-shell-notes-modes-derive-from-the-chosen-parent ()
+  ;; §2: the parent's hook runs, its map is the parent of the package
+  ;; maps, and `derived-mode-p' names it.
+  (agent-shell-notes-tests--with-clean-state
+    (let* ((parent (agent-shell-notes-tests--parent))
+           (hook (intern (format "%s-hook" parent)))
+           (ran nil)
+           (record (lambda () (push major-mode ran))))
+      (should (eq parent agent-shell-notes--markdown-parent))
+      (dolist (map (list agent-shell-notes-review-mode-map
+                         agent-shell-notes-capture-mode-map
+                         agent-shell-notes-edit-mode-map))
+        (should (eq (agent-shell-notes-tests--parent-map)
+                    (keymap-parent map))))
+      (add-hook hook record)
+      (unwind-protect
+          (let ((buf (agent-shell-notes-tests--file
+                      (agent-shell-notes-tests--lines 3))))
+            (agent-shell-notes-tests--select buf 2)
+            (agent-shell-notes-capture)
+            (with-current-buffer "*agent-shell-notes capture*"
+              (should (derived-mode-p parent)))
+            (with-current-buffer "*agent-shell-notes capture*"
+              (agent-shell-notes-capture-save))
+            (agent-shell-notes-review)
+            (with-current-buffer "*agent-shell-notes*"
+              (should (derived-mode-p parent))
+              (should (eq agent-shell-notes-review-mode-map
+                          (current-local-map))))
+            (should (equal '(agent-shell-notes-review-mode
+                             agent-shell-notes-capture-mode)
+                           ran)))
+        (remove-hook hook record)))))
+
+(ert-deftest agent-shell-notes-modes-derive-from-markdown-ts-mode ()
+  ;; With the grammars, the default `auto' picks markdown-ts-mode.
+  (skip-unless (agent-shell-notes-tests--ts-p))
+  (should (eq 'auto agent-shell-notes-markdown-mode))
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 1)
+    (should (eq 'markdown-ts-mode agent-shell-notes--markdown-parent))
+    (should (derived-mode-p 'markdown-ts-mode))
+    (should (eq markdown-ts-mode-map
+                (keymap-parent agent-shell-notes-review-mode-map)))))
+
+(ert-deftest agent-shell-notes-markdown-ts-heading-tab-folds-the-group ()
+  ;; markdown-ts-mode has no `markdown-shifttab'; its outline cycling on
+  ;; headings is what folds groups instead.
+  (skip-unless (agent-shell-notes-tests--ts-p))
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 2)
+    (agent-shell-notes-tests--fontify)
+    (goto-char (point-min))
+    (should (eq 'outline-cycle-buffer (key-binding (kbd "<backtab>") t)))
+    (agent-shell-notes-tests--press "TAB")
+    (should (invisible-p (agent-shell-notes-tests--search "^n1$")))
+    (should-not (invisible-p (agent-shell-notes-tests--search "^# Request")))
+    (agent-shell-notes-tests--press "TAB")
+    (should-not (invisible-p (agent-shell-notes-tests--search "^n1$")))))
+
+(ert-deftest agent-shell-notes-tab-on-a-fenced-quote-folds-it ()
+  ;; §5.1, §4.4: TAB pressed on a fenced quote folds it in both buffers,
+  ;; whatever minor modes the parent turns on inside code blocks.
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 12))))
+      (agent-shell-notes-tests--capture buf 1 11 "long")
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--fontify)
+        (should (invisible-p (agent-shell-notes-tests--search "^line 7$")))
+        (goto-char (agent-shell-notes-tests--search "^line 2$"))
+        (agent-shell-notes-tests--press "TAB")
+        (should-not (invisible-p (agent-shell-notes-tests--search
+                                  "^line 7$")))
+        (agent-shell-notes-tests--press "TAB")
+        (should (invisible-p (agent-shell-notes-tests--search "^line 7$"))))
+      (agent-shell-notes-tests--select buf 1 11)
+      (agent-shell-notes-capture)
+      (with-current-buffer "*agent-shell-notes capture*"
+        (agent-shell-notes-tests--fontify)
+        (goto-char (agent-shell-notes-tests--search "^line 2$"))
+        (agent-shell-notes-tests--press "TAB")
+        (should-not (invisible-p (agent-shell-notes-tests--search
+                                  "^line 7$")))))))
+
+(ert-deftest agent-shell-notes-review-fence-language-highlights ()
+  ;; The quote's fence names its language, and the parent fontifies the
+  ;; code in that language (markdown-mode only when told to).
+  (agent-shell-notes-tests--with-clean-state
+    (let ((markdown-fontify-code-blocks-natively t))
+      (setq agent-shell-notes--notes
+            (list (agent-shell-notes-tests--file-note
+                   1 "/proj/a/" "src/foo.el" 1 1 "(defun foo () nil)" "")))
+      (agent-shell-notes-review)
+      (with-current-buffer "*agent-shell-notes*"
+        (agent-shell-notes-tests--fontify)
+        ;; The text's own face: markdown-ts-mode lays a block overlay
+        ;; with a face of its own over the code.
+        (should (memq 'font-lock-keyword-face
+                      (ensure-list
+                       (get-text-property
+                        (1+ (agent-shell-notes-tests--search "(defun"))
+                        'face))))))))
 
 (ert-deftest agent-shell-notes-render-claude-diff-notes ()
   (should (equal (agent-shell-notes-tests--golden "claude-diff")

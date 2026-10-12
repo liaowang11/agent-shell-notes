@@ -37,6 +37,70 @@
   :group 'tools
   :prefix "agent-shell-notes-")
 
+(defcustom agent-shell-notes-markdown-mode 'auto
+  "The Markdown mode the review and the capture popup derive from.
+`auto' takes `markdown-ts-mode' when it can run: the mode exists
+\(Emacs 31 and later) and the `markdown' and `markdown-inline'
+tree-sitter grammars are installed.  Otherwise it takes
+`markdown-mode'.  `markdown-ts-mode' is the same, except it warns
+when it falls back.
+
+The choice is made when the package loads.  Set this before that;
+after a change, reload the package (\[load-library] agent-shell-notes)
+and reopen the review and the popup."
+  :type '(choice (const :tag "markdown-ts-mode when it can run" auto)
+                 (const :tag "markdown-ts-mode, warn on fallback"
+                        markdown-ts-mode)
+                 (const :tag "markdown-mode" markdown-mode)))
+
+(declare-function treesit-ready-p "treesit" (language &optional quiet))
+
+(defun agent-shell-notes--markdown-ts-ready-p ()
+  "Return non-nil when `markdown-ts-mode' can run in this Emacs.
+The mode alone is not enough: without both grammars it turns the
+buffer into `text-mode'."
+  (and (require 'markdown-ts-mode nil t)
+       (treesit-ready-p '(markdown markdown-inline) t)))
+
+(defun agent-shell-notes--choose-markdown-mode ()
+  "Return the mode `agent-shell-notes-markdown-mode' picks in this Emacs."
+  (cond ((eq agent-shell-notes-markdown-mode 'markdown-mode) 'markdown-mode)
+        ((agent-shell-notes--markdown-ts-ready-p) 'markdown-ts-mode)
+        (t (when (eq agent-shell-notes-markdown-mode 'markdown-ts-mode)
+             (display-warning 'agent-shell-notes
+                              "markdown-ts-mode cannot run (no mode or no \
+`markdown'/`markdown-inline' grammar); using markdown-mode"))
+           'markdown-mode)))
+
+(defvar agent-shell-notes--markdown-parent nil
+  "The Markdown mode the package's modes derive from, chosen at load.")
+
+(setq agent-shell-notes--markdown-parent
+      (agent-shell-notes--choose-markdown-mode))
+
+;; The modes derive from this alias.  `define-derived-mode' needs a
+;; literal parent; `derived-mode-p' follows the alias to the real mode
+;; on Emacs 29.1 as on 31, and calling it runs the real mode, hooks
+;; included.
+(defalias 'agent-shell-notes--markdown-mode agent-shell-notes--markdown-parent
+  "The Markdown mode in `agent-shell-notes--markdown-parent'.")
+
+(defun agent-shell-notes--markdown-map ()
+  "Return the keymap of `agent-shell-notes--markdown-parent'."
+  (symbol-value (derived-mode-map-name agent-shell-notes--markdown-parent)))
+
+(defvar markdown-ts-code-block-context-mode)
+(declare-function markdown-ts-code-block-context-mode "markdown-ts-mode"
+                  (&optional arg))
+
+(defun agent-shell-notes--markdown-setup ()
+  "Adjust the Markdown parent for the review and the popup.
+markdown-ts-mode turns on a minor mode whose map takes `TAB' and
+`RET' inside code blocks; the quotes are read-only code blocks whose
+`TAB' folds, so turn it off."
+  (when (bound-and-true-p markdown-ts-code-block-context-mode)
+    (markdown-ts-code-block-context-mode -1)))
+
 (defface agent-shell-notes-location
   '((t :inherit font-lock-comment-face))
   "Face of a note's location line.")
@@ -1031,7 +1095,8 @@ In the note area of the capture popup, do what TAB does in Markdown."
                     (cons id agent-shell-notes--unfolded)
                   (delq id agent-shell-notes--unfolded))))))
      (agent-shell-notes--text-start
-      (call-interactively (lookup-key markdown-mode-map (kbd "TAB")))))))
+      (call-interactively (lookup-key (agent-shell-notes--markdown-map)
+                                      (kbd "TAB")))))))
 
 ;;;; Locations and quotes
 
@@ -1124,13 +1189,15 @@ lives on an overlay.  The overlay goes when its text does."
   "C-c C-k" #'agent-shell-notes-capture-abort
   "TAB" #'agent-shell-notes-toggle-quote)
 
-(define-derived-mode agent-shell-notes-capture-mode markdown-mode "Note"
+(define-derived-mode agent-shell-notes-capture-mode
+  agent-shell-notes--markdown-mode "Note"
   "Major mode of the popup where a note is written.
 The location and quote at the top are read-only; the note goes below.
 \\<agent-shell-notes-capture-mode-map>\
 \\[agent-shell-notes-capture-save] saves, \
 \\[agent-shell-notes-capture-abort] aborts, \
 \\[agent-shell-notes-toggle-quote] on the quote unfolds it."
+  (agent-shell-notes--markdown-setup)
   (add-to-invisibility-spec '(agent-shell-notes-quote . t))
   (setq header-line-format
         (substitute-command-keys
@@ -1138,6 +1205,11 @@ The location and quote at the top are read-only; the note goes below.
 \\[agent-shell-notes-capture-save] save  \
 \\[agent-shell-notes-capture-abort] abort  \
 \\[agent-shell-notes-toggle-quote] unfold quote")))
+
+;; Set here, not on first use, so reloading after a change of
+;; `agent-shell-notes-markdown-mode' moves the map to the new parent.
+(set-keymap-parent agent-shell-notes-capture-mode-map
+                   (agent-shell-notes--markdown-map))
 
 (declare-function evil-set-initial-state "evil-core" (mode state))
 
@@ -1239,12 +1311,13 @@ Kept apart from the review buffer, which is redrawn from scratch.")
 In the body the binding is void, so the key falls through to the next
 active map: an evil state map, else the global map (for a printing
 key, `self-insert-command').  A void binding skips the parent
-`markdown-mode-map' too, so with KEY the body gets KEY's binding there
+Markdown map too, so with KEY the body gets KEY's binding there
 instead, if any."
   `(menu-item "" ,command
               :filter ,(lambda (cmd)
                          (cond ((not (agent-shell-notes-in-request-p)) cmd)
-                               (key (keymap-lookup markdown-mode-map key))))))
+                               (key (keymap-lookup (agent-shell-notes--markdown-map)
+                                                   key))))))
 
 (defvar-keymap agent-shell-notes-review-mode-map
   :doc "Keymap for `agent-shell-notes-review-mode'.
@@ -1272,13 +1345,18 @@ they type; see `agent-shell-notes-in-request-p'."
   "<mouse-1>" #'agent-shell-notes-jump
   "q" (agent-shell-notes--outside-request #'quit-window))
 
-(define-derived-mode agent-shell-notes-review-mode markdown-mode "Notes"
+(define-derived-mode agent-shell-notes-review-mode
+  agent-shell-notes--markdown-mode "Notes"
   "Major mode of the review, where the collected notes are shown.
 The buffer is drawn from the note list; its text is read-only.
 
 \\{agent-shell-notes-review-mode-map}"
+  (agent-shell-notes--markdown-setup)
   (add-to-invisibility-spec '(agent-shell-notes-quote . t))
   (setq truncate-lines nil))
+
+(set-keymap-parent agent-shell-notes-review-mode-map
+                   (agent-shell-notes--markdown-map))
 
 ;;;; Edit mode
 
@@ -1292,11 +1370,13 @@ turns them into markers.")
   :doc "Local keymap of the review in `agent-shell-notes-edit-mode'.
 It replaces `agent-shell-notes-review-mode-map', so the note commands
 are inactive and letters insert."
-  :parent markdown-mode-map
   "C-c C-c" #'agent-shell-notes-edit-commit
   "C-c C-k" #'agent-shell-notes-edit-revert
   "C-c C-e" #'agent-shell-notes-edit-commit
   "C-x C-q" #'agent-shell-notes-edit-commit)
+
+(set-keymap-parent agent-shell-notes-edit-mode-map
+                   (agent-shell-notes--markdown-map))
 
 (define-minor-mode agent-shell-notes-edit-mode
   "Edit the note texts of the review, like `wdired-mode'.
