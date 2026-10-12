@@ -2,7 +2,7 @@
 title: Request body without its own keymap
 status: open
 labels: [ready-for-agent]
-assignee:
+assignee: claude
 blocked-by: []
 ---
 
