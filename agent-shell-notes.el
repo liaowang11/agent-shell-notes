@@ -1640,6 +1640,10 @@ Point stays on the note it was on.  The request body is kept."
     (goto-char (or (and id (text-property-any (point-min) (point-max)
                                               'agent-shell-notes-id id))
                    (min pos (point-max))))
+    ;; Undo would bring back the old text without the note list or the
+    ;; request start, so a redraw is a fresh history.
+    (unless (eq buffer-undo-list t)
+      (setq buffer-undo-list nil))
     (set-buffer-modified-p nil)))
 
 (defun agent-shell-notes--review-refresh ()

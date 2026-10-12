@@ -1082,6 +1082,33 @@ Note I is on line I, so the review order is 1 .. N."
       (goto-char (point-max))
       (should (eq 'self-insert-command (key-binding "m"))))))
 
+(ert-deftest agent-shell-notes-review-undo-cannot-revert-a-redraw ()
+  ;; Undoing a redraw brought the old text back without the note list
+  ;; or the request start, which fell to `point-min'; the next redraw
+  ;; then took the whole stale buffer for the request.
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 1)
+    (undo-boundary)
+    (agent-shell-notes-tests--goto-note 1)
+    (agent-shell-notes-tests--key "k")
+    (undo-boundary)
+    (setq last-command nil)
+    ;; Nothing to undo once the redraw drops the history.
+    (ignore-error user-error (undo))
+    (undo-boundary)
+    (goto-char (point-min))
+    (should-not (agent-shell-notes-in-request-p))
+    (agent-shell-notes-tests--key "C-x C-q")
+    (should (equal "# Request\n\n"
+                   (buffer-substring-no-properties (point-min) (point-max))))
+    ;; Typing in the body still undoes.
+    (goto-char (agent-shell-notes-tests--request-start))
+    (agent-shell-notes-tests--type "fix")
+    (undo-boundary)
+    (setq last-command nil)
+    (undo)
+    (should (equal "" (agent-shell-notes-tests--request)))))
+
 ;;;; Rendering
 
 (defconst agent-shell-notes-tests--golden-dir
