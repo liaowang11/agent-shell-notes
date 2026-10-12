@@ -1929,7 +1929,9 @@ LOCATION also takes :quote and :text, which go to the note."
      beg (next-single-property-change beg prop nil (point-max)))))
 
 (defun agent-shell-notes-tests--location-faces (id)
-  "Return (FACE . TEXT) for each face run in the location of note ID."
+  "Return (FACE . TEXT) for each face run in the location of note ID.
+The face is what display sees first: an overlay's over a text
+property's."
   (let* ((beg (text-property-any
                (text-property-any (point-min) (point-max)
                                   'agent-shell-notes-id id)
@@ -1937,8 +1939,8 @@ LOCATION also takes :quote and :text, which go to the note."
          (end (next-single-property-change beg 'agent-shell-notes-field))
          runs)
     (while (< beg end)
-      (let ((next (next-single-property-change beg 'face nil end)))
-        (when-let* ((face (get-text-property beg 'face)))
+      (let ((next (next-single-char-property-change beg 'face nil end)))
+        (when-let* ((face (get-char-property beg 'face)))
           (push (cons face (buffer-substring-no-properties beg next)) runs))
         (setq beg next)))
     (nreverse runs)))
@@ -1979,6 +1981,67 @@ LOCATION also takes :quote and :text, which go to the note."
       (should (equal "+x\n y" (agent-shell-notes-tests--field-text 1 'quote)))
       (should (equal '(1 2 3) (agent-shell-notes-tests--runs
                                'agent-shell-notes-id))))))
+
+(defun agent-shell-notes-tests--fontify ()
+  "Run the major mode's real font-lock over the current buffer."
+  (font-lock-mode 1)
+  (font-lock-ensure))
+
+(defun agent-shell-notes-tests--face-overlays (face)
+  "Return the overlays of the current buffer whose face is FACE."
+  (seq-filter (lambda (ov) (eq face (overlay-get ov 'face)))
+              (overlays-in (point-min) (point-max))))
+
+(ert-deftest agent-shell-notes-review-faces-survive-font-lock ()
+  ;; §5.1: font-lock from the Markdown parent repaints `**...**' and
+  ;; backquoted text; the package faces must still win.
+  (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes--notes
+          (list (agent-shell-notes-tests--magit-note
+                 1 "/proj/a/" "src/foo.el" :side 'old :start 7 :end 7
+                 :type 'staged :quote "-z")
+                (agent-shell-notes-tests--file-note
+                 2 "/proj/a/" "src/bar.el" 1 1 "(bar)" "")
+                (agent-shell-notes-tests--file-note
+                 3 "/proj/a/" "src/baz.el" 1 1 "(baz)" "")))
+    (setf (alist-get :archived (nth 2 agent-shell-notes--notes)) "S")
+    (agent-shell-notes-review)
+    (with-current-buffer "*agent-shell-notes*"
+      (dotimes (_ 2)
+        (agent-shell-notes-tests--fontify)
+        (should (equal '((agent-shell-notes-location . "**line 7**")
+                         (agent-shell-notes-tag . "`staged`")
+                         (agent-shell-notes-tag . "`before changes`"))
+                       (agent-shell-notes-tests--location-faces 1)))
+        (should (equal '((agent-shell-notes-location . "**line 1**"))
+                       (agent-shell-notes-tests--location-faces 2)))
+        ;; An archived note dims its location and tags too.
+        (should (equal '((agent-shell-notes-archived
+                          . "**line 1** `sent to S`"))
+                       (agent-shell-notes-tests--location-faces 3)))
+        ;; A redraw rebuilds the overlays and leaves no stale ones.
+        (agent-shell-notes-redraw)
+        (should (= 3 (length (agent-shell-notes-tests--face-overlays
+                              'agent-shell-notes-location))))
+        (should (= 3 (length (agent-shell-notes-tests--face-overlays
+                              'agent-shell-notes-tag))))))))
+
+(ert-deftest agent-shell-notes-capture-popup-location-survives-font-lock ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((buf (agent-shell-notes-tests--file
+                (agent-shell-notes-tests--lines 3))))
+      (agent-shell-notes-tests--select buf 2)
+      (agent-shell-notes-capture)
+      (with-current-buffer "*agent-shell-notes capture*"
+        (agent-shell-notes-tests--fontify)
+        (goto-char (point-min))
+        (should (looking-at-p "sample.el line 2$"))
+        (dotimes (i (length "sample.el line 2"))
+          (should (eq 'agent-shell-notes-location
+                      (get-char-property (+ (point-min) i) 'face))))
+        (should-not (get-char-property (line-end-position) 'face))
+        (should (= 1 (length (agent-shell-notes-tests--face-overlays
+                              'agent-shell-notes-location))))))))
 
 (ert-deftest agent-shell-notes-render-claude-diff-notes ()
   (should (equal (agent-shell-notes-tests--golden "claude-diff")

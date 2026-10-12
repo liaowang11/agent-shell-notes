@@ -1095,6 +1095,15 @@ the file's language, or `text' when there is no file."
 
 ;;;; Capture popup
 
+(defun agent-shell-notes--face-overlay (beg end face)
+  "Give the text from BEG to END the FACE, through an overlay.
+Font-lock repaints `face' text properties, so a face that must stay
+lives on an overlay.  The overlay goes when its text does."
+  (let ((ov (make-overlay beg end nil t)))
+    (overlay-put ov 'face face)
+    (overlay-put ov 'evaporate t)
+    ov))
+
 (defconst agent-shell-notes--capture-buffer-name
   "*agent-shell-notes capture*")
 
@@ -1137,9 +1146,10 @@ The location and quote at the top are read-only; the note goes below.
 
 (defun agent-shell-notes--capture-insert-header (note)
   "Insert NOTE's read-only location line and quote at point."
-  (insert (propertize (agent-shell-notes--location-string note)
-                      'face 'agent-shell-notes-location)
-          "\n")
+  (let ((beg (point)))
+    (insert (agent-shell-notes--location-string note))
+    (agent-shell-notes--face-overlay beg (point) 'agent-shell-notes-location))
+  (insert "\n")
   (agent-shell-notes--insert-quote note)
   (insert "\n")
   (add-text-properties (point-min) (point) '(read-only t front-sticky t))
@@ -1415,26 +1425,21 @@ group by line."
         (text (alist-get :text note)))
     (agent-shell-notes--insert-field
      'location
-     (mapconcat #'identity
-                (cons (propertize
-                       (format "**%s**"
-                               (pcase (alist-get :source note)
-                                 ('transcript (agent-shell-notes--kind-name
-                                               (plist-get
-                                                (alist-get :location note)
-                                                :kind)))
-                                 ('dired (agent-shell-notes--dired-names
-                                          note (plist-get
-                                                (alist-get :location note)
-                                                :directory)))
-                                 (_ (agent-shell-notes--range-string
-                                     (alist-get :location note)))))
-                       'face 'agent-shell-notes-location)
-                      (mapcar (lambda (tag)
-                                (propertize (format "`%s`" tag)
-                                            'face 'agent-shell-notes-tag))
-                              (agent-shell-notes--tags note)))
-                " "))
+     (format "**%s**"
+             (pcase (alist-get :source note)
+               ('transcript (agent-shell-notes--kind-name
+                             (plist-get (alist-get :location note) :kind)))
+               ('dired (agent-shell-notes--dired-names
+                        note (plist-get (alist-get :location note)
+                                        :directory)))
+               (_ (agent-shell-notes--range-string
+                   (alist-get :location note))))))
+    (agent-shell-notes--face-overlay beg (point) 'agent-shell-notes-location)
+    (dolist (tag (agent-shell-notes--tags note))
+      (agent-shell-notes--insert-field 'location " ")
+      (let ((tbeg (point)))
+        (agent-shell-notes--insert-field 'location (format "`%s`" tag))
+        (agent-shell-notes--face-overlay tbeg (point) 'agent-shell-notes-tag)))
     (insert "\n")
     (agent-shell-notes--insert-quote
      note (memq id agent-shell-notes--unfolded))
@@ -1449,10 +1454,10 @@ group by line."
       (insert "\n")))
     (put-text-property beg (point) 'agent-shell-notes-id id)
     (when (alist-get :archived note)
-      ;; An overlay, so font-lock does not wipe it.
-      (let ((ov (make-overlay beg (point) nil t)))
-        (overlay-put ov 'face 'agent-shell-notes-archived)
-        (overlay-put ov 'evaporate t)))
+      ;; Above the location and tag overlays, so they dim too.
+      (overlay-put (agent-shell-notes--face-overlay
+                    beg (point) 'agent-shell-notes-archived)
+                   'priority 1))
     (when (memq id agent-shell-notes--marks)
       (agent-shell-notes--show-mark id beg (point)))))
 
