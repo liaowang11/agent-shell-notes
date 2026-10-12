@@ -27,8 +27,8 @@ Answer with file:line citations. Facts only; the choice is the next ticket.
 
 ## Resolution
 
-Findings: `docs/research/05-compose-buffer-facts.md` on local branch
-`research/compose-buffer-facts` (45eb875, not pushed). Sources: agent-shell
+Findings: [`docs/research/05-compose-buffer-facts.md`](../../research/05-compose-buffer-facts.md).
+Sources: agent-shell
 70616c4a, agent-shell-side 68a950fb, and Bill's private Doom config.
 
 - Each session has one compose surface, `<shell> [viewport]`, shared with the

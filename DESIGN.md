@@ -12,8 +12,7 @@ This supersedes the earlier design: `git show 0e6b22c:DESIGN.md`.
 Facts were re-checked against agent-shell (Bill's fork,
 `~/Repositories/forks/agent-shell`, `70616c4a`) and Magit 4.7.0 (`67f2038`,
 the straight build). `docs/research/` is the fact base for everything else
-(package survey, agent app wire formats, compose-buffer facts on branch
-`research/compose-buffer-facts`).
+(package survey, agent app wire formats, compose-buffer facts).
 
 ## 1. What it is
 
