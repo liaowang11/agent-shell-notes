@@ -47,6 +47,26 @@ Request, Style, Client, Target session, Archived note.
   its clone at the start of implementation; GitHub redirects). No alias
   prefix.
 - `Package-Requires: ((emacs "29.1") (agent-shell) (markdown-mode))`.
+- Markdown parent: the review and the popup derive from `markdown-ts-mode`
+  when it can run (the mode exists, Emacs 31 and later, and
+  `treesit-ready-p` with QUIET accepts both `markdown` and
+  `markdown-inline`; without the inline grammar the mode falls back to
+  `text-mode` itself), else from `markdown-mode`, which stays a
+  dependency. Option `agent-shell-notes-markdown-mode`: `auto` (default),
+  `markdown-ts-mode` (same, but warns on fallback), `markdown-mode`. Read
+  once when the package loads; a change needs a reload
+  (`load-library`) and reopened buffers.
+- Mechanism: `agent-shell-notes--markdown-mode` is a `defalias` to the
+  chosen mode, and both modes are `define-derived-mode` children of that
+  alias. Calling the alias runs the real mode, so its body and hooks run
+  (`markdown-ts-mode-hook`, not `markdown-mode-hook`, under the
+  tree-sitter mode). `derived-mode-p` follows a parent that is an alias
+  on 29.1 (`provided-mode-derived-p`) and on 31
+  (`derived-mode-all-parents`), so it reports the real mode. The package
+  maps get the chosen mode's map as parent at load, explicitly, so a
+  reload moves them. Each mode body turns off markdown-ts-mode's
+  `markdown-ts-code-block-context-mode`: its map takes `TAB` inside code
+  blocks, and the quotes are read-only code blocks whose `TAB` folds.
   Magit is a soft dependency via `declare-function`; the Magit source type
   is skipped when Magit is not loaded.
 - Buffers: `*agent-shell-notes*` (the review) and
@@ -161,7 +181,7 @@ Capturing during a streaming turn is allowed.
 ### 4.4 The popup
 
 - Buffer `*agent-shell-notes capture*`, major mode
-  `agent-shell-notes-capture-mode` derived from `markdown-mode`. Shown with
+  `agent-shell-notes-capture-mode` derived from the Markdown parent (§2). Shown with
   `pop-to-buffer` and `agent-shell-notes-capture-display-action` (default:
   `display-buffer-at-bottom`, `window-height` 0.3). Evil insert state when
   evil is loaded (`evil-set-initial-state`, guarded by `featurep`). This
@@ -184,7 +204,8 @@ and `agent-shell-notes-review-display-action` (default nil: whatever
 
 ### 5.1 Display
 
-Major mode `agent-shell-notes-review-mode`, derived from `markdown-mode`.
+Major mode `agent-shell-notes-review-mode`, derived from the Markdown
+parent (§2).
 The buffer is writable, but every span outside the request body carries
 the `read-only` text property, so the single-letter keys in 5.2 act on
 notes while the request body takes ordinary typing. The body carries no
@@ -277,7 +298,7 @@ Every printing key above, plus `RET` and `TAB`, is bound as a `menu-item`
 whose `:filter` returns nil when point is in the request body. The key
 then falls through to the next active map: an evil state map, else the
 global map, so letters insert. A void binding also skips the review map's
-parent, so `RET` and `TAB` return `markdown-mode-map`'s binding in the
+parent, so `RET` and `TAB` return the Markdown parent's binding in the
 body instead (newline and cycling, as in any Markdown buffer). `C-c C-c`,
 `C-c C-r`, `C-c C-e`, `C-x C-q` and `mouse-1` stay plain bindings, so they
 work from the body too. The public predicate
@@ -600,7 +621,7 @@ keys in 5.2, 5.3 and 4.4.
 Functions: `agent-shell-notes-in-request-p`, the request-body test of the
 review's key filter (5.2).
 
-Options: `agent-shell-notes-sources`, `-style`, `-after-send`,
+Options: `agent-shell-notes-markdown-mode`, `-sources`, `-style`, `-after-send`,
 `-mark-indicator`, `-fence-languages`, `-capture-display-action`,
 `-review-display-action`, `-client`,
 `-agent-shell-disposition`.
@@ -648,6 +669,13 @@ Makefile variables listed once and shared by local runs and CI
   a time, window configuration restored. The evil tests (popup insert
   state; `i` and `j` in the request body under normal state) skip when
   evil is not on the load path.
+- **Markdown parent**: the parent is fixed at load, so one run covers one
+  parent. `make check` (and CI) runs the suite under the markdown-mode
+  fallback; `make test-ts` runs it again on Emacs 31 with the grammar
+  directory (`TREESIT_TS_DIR`) on `treesit-extra-load-path`, so the
+  modes derive from markdown-ts-mode, and fails early when the grammars
+  do not load. Parent-specific tests (outline cycling on headings) skip
+  in the fallback run.
 - **Live**: `make live-check`, by hand, outside `check` and CI. Starts a
   real claude-agent-acp session through agent-shell, sends a two-note
   review with `C-c C-c` and asserts the transcript's user prompt equals the
@@ -692,7 +720,8 @@ Settled here, not in a ticket; low risk, cheap to change:
   with shared numbering; other-session quotes go between the response
   annotations and the diff comments.
 - `omp` numbers run across the whole send, not per heading.
-- The review and popup modes derive from `markdown-mode`; edit mode is a
+- The review and popup modes derive from markdown-ts-mode when it can
+  run, else `markdown-mode` (§2); edit mode is a
   wdired-style minor mode using the `read-only` text property.
 - The target picker has no project column; order carries the hint.
 - Jump ladder (section 9).

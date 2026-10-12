@@ -61,6 +61,10 @@ If the player does not load, see [docs/assets/demo.mp4](docs/assets/demo.mp4).
 - Emacs 29.1 or later.
 - [agent-shell](https://github.com/xenodium/agent-shell) and
   [markdown-mode](https://github.com/jrblevin/markdown-mode).
+- Optional: `markdown-ts-mode` (built into Emacs 31) with the `markdown`
+  and `markdown-inline` tree-sitter grammars. When both are there, the
+  review and the popup use it; otherwise they use markdown-mode. See
+  [Which Markdown mode does the review use?](#which-markdown-mode-does-the-review-use)
 - [Magit](https://magit.vc) is optional. Without it, Magit diffs are not a
   capture source.
 
@@ -172,7 +176,7 @@ read-only, and takes the note below.
 | --- | --- |
 | `C-c C-c` | Save the note. An empty note is saved as a quote-only note. |
 | `C-c C-k` | Abort without asking. |
-| `TAB` | On the quote: unfold or fold it. Elsewhere: markdown-mode's `TAB`. |
+| `TAB` | On the quote: unfold or fold it. Elsewhere: the Markdown mode's `TAB`. |
 
 Running `agent-shell-notes-capture` while a popup is open switches to it.
 Under evil the popup opens in insert state.
@@ -235,6 +239,7 @@ All options are in the `agent-shell-notes` customization group
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `agent-shell-notes-markdown-mode` | `auto` | The mode the review and popup derive from: `auto` (markdown-ts-mode when it can run, else markdown-mode), `markdown-ts-mode` (the same, but warn on fallback) or `markdown-mode`. Read when the package loads: set it before, or reload the package after a change. |
 | `agent-shell-notes-style` | `claude` | Format of a send: `claude` (Claude desktop), `codex` (Codex app) or `omp` (oh-my-pi `/annotate`). |
 | `agent-shell-notes-after-send` | `remove` | What a send does to the sent notes: `remove`, `archive` (keep them dimmed, tagged `sent to <session>`) or `keep`. |
 | `agent-shell-notes-agent-shell-disposition` | nil | How a send reaches a busy shell: nil (agent-shell's default), `queue` or `steer`. Does not apply to compose, which keeps the compose buffer's own choice. |
@@ -391,6 +396,43 @@ own from firing in the body, wrap it like the package does:
                                cmd))))
 ```
 
+### Which Markdown mode does the review use?
+
+`markdown-ts-mode` when it can run: Emacs 31 or later ships it (turned
+off by default, but present), and the `markdown` and `markdown-inline`
+grammars must be installed (`M-x markdown-ts-mode-install-parsers`).
+Otherwise markdown-mode, which stays a dependency. Set
+`agent-shell-notes-markdown-mode` to `markdown-mode` to never use the
+tree-sitter mode.
+
+The choice is made once, when the package loads. After changing the
+option, run `M-x load-library RET agent-shell-notes` and reopen the
+review and the popup.
+
+Both modes run their own hooks: under markdown-ts-mode,
+`markdown-ts-mode-hook` runs and `markdown-mode-hook` does not, though
+`derived-mode-p` still reports `markdown-mode`. A setting in
+`markdown-mode-hook` (evil-markdown, say) does not reach the review
+then.
+
+The package keys behave the same under both. What differs is the
+Markdown mode's own keys:
+
+- `S-TAB` (`markdown-shifttab`), which folds every group from anywhere,
+  has no markdown-ts-mode equivalent. In its place, `TAB` on a group
+  heading folds that group and `S-TAB` on a heading cycles all of them
+  (outline cycling). Under markdown-mode `TAB` on a heading does nothing.
+  A redraw unfolds the groups.
+- In the request body and the popup's note area, `TAB` and `RET` are
+  markdown-ts-mode's: `TAB` cycles a heading and does nothing elsewhere,
+  `RET` continues list items and block quotes.
+- markdown-ts-mode's command mode inside code blocks (`TAB` indenting in
+  the block's language) is turned off in both buffers, because the
+  quotes are read-only code blocks and `TAB` folds them.
+- Quote code is highlighted in its language by default under
+  markdown-ts-mode; under markdown-mode only with
+  `markdown-fontify-code-blocks-natively`.
+
 ### The session picker ignores "last target first". Why?
 
 agent-shell-vertico re-sorts the picker by recency, so the package's order
@@ -457,12 +499,23 @@ whitespace in that directory.
 
 ```sh
 make check        # byte-compile with warnings as errors, then batch ERT
+make test-ts      # the same ERT suite under markdown-ts-mode (Emacs 31+)
 make live-check   # real agent round trip, by hand only
 ```
 
+`make check` runs the suite under the markdown-mode fallback. `make
+test-ts` runs it again with the tree-sitter grammars on
+`treesit-extra-load-path`, so the review and popup derive from
+markdown-ts-mode. It reads the grammars from `TREESIT_TS_DIR`, default
+`~/.config/emacs/.local/etc/tree-sitter` (Doom's directory), and fails
+at once if they cannot load. `make check-ts` is compile plus `test-ts`.
+Tests that only make sense under markdown-ts-mode skip in the fallback
+run.
+
 Dependency checkouts are Makefile variables (`FORKS_DIR`,
 `STRAIGHT_REPOS`, or per repo such as `AGENT_SHELL_DIR`). CI runs
-`make check` on Emacs 29.1 and snapshot.
+`make check` on Emacs 29.1 and snapshot, without grammars, so it covers
+the fallback only.
 
 `make live-check` starts a real claude-agent-acp session and spends tokens.
 It needs `claude-agent-acp` on `PATH` and a logged-in Claude account.
