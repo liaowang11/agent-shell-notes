@@ -52,3 +52,17 @@ which fail the same way on the previous commit: the agent-shell fork's
 compose buffer now has two extra blank lines after the draft.
 
 Unverified: the live review in a GUI frame.
+
+2026-10-18 (claude): follow-up after merging origin/main (4e895ee).
+
+Send time: an `archive` send now sets `:sent` (the send time) next to
+`:archived`; restore-last puts both back. `# Archived` groups go newest
+send first (notes archived before this change, with no `:sent`, last),
+the heading says `# Archived — newest first`, and the tag reads
+`sent to <session>, 11:52` (`Oct 17 09:30` on another day).
+
+Where it went: the tag already names the target session. A turn number
+in the target was checked and left out: `:turn-count` is the count at
+send time, but a queued prompt lands later and a compose may be edited
+or never sent, so "turn N" would often be wrong. Possible later: record
+the session id and let `RET` on the tag open the target shell.
