@@ -204,6 +204,7 @@ and single keys act on notes:
 | `k` | `agent-shell-notes-delete` | Delete the note at point, no confirmation. |
 | `D` | `agent-shell-notes-delete-marked` | Delete the marked notes, after confirming. |
 | `x` | `agent-shell-notes-purge-archived` | Delete every archived note. |
+| `a` | `agent-shell-notes-toggle-archived` | Show or hide archived notes, under `# Archived` below the others. Hidden by default. |
 | `e` | `agent-shell-notes-edit` | Enter edit mode at this note's text. |
 | `C-c C-e`, `C-x C-q` | `agent-shell-notes-edit-mode` | Enter edit mode. |
 | `RET`, `mouse-1` | `agent-shell-notes-jump` | On a location line or group heading: jump to the source and flash it. |
@@ -249,6 +250,7 @@ All options are in the `agent-shell-notes` customization group
 | `agent-shell-notes-markdown-mode` | `auto` | The mode the review and popup derive from: `auto` (markdown-ts-mode when it can run, else markdown-mode), `markdown-ts-mode` (the same, but warn on fallback) or `markdown-mode`. Read when the package loads: set it before, or reload the package after a change. |
 | `agent-shell-notes-style` | `claude` | Format of a send: `claude` (Claude desktop), `codex` (Codex app) or `omp` (oh-my-pi `/annotate`). |
 | `agent-shell-notes-after-send` | `remove` | What a send does to the sent notes: `remove`, `archive` (keep them dimmed, tagged `sent to <session>`) or `keep`. |
+| `agent-shell-notes-show-archived` | nil | Show archived notes in the review, under `# Archived`. `a` toggles it for the session. |
 | `agent-shell-notes-agent-shell-disposition` | nil | How a send reaches a busy shell: nil (agent-shell's default), `queue` or `steer`. Does not apply to compose, which keeps the compose buffer's own choice. |
 | `agent-shell-notes-mark-indicator` | `fringe` | How a mark shows: `fringe` (a `*` in the margin on a terminal) or `background`. |
 | `agent-shell-notes-sources` | transcript, magit, dired, file, buffer | Capture sources tried in order, each `(SYMBOL PREDICATE EXTRACT)`. Add a new mode's entry before `buffer`, which matches everything. |

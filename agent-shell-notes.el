@@ -1362,6 +1362,7 @@ they type; see `agent-shell-notes-in-request-p'."
   "k" (agent-shell-notes--outside-request #'agent-shell-notes-delete)
   "D" (agent-shell-notes--outside-request #'agent-shell-notes-delete-marked)
   "x" (agent-shell-notes--outside-request #'agent-shell-notes-purge-archived)
+  "a" (agent-shell-notes--outside-request #'agent-shell-notes-toggle-archived)
   "e" (agent-shell-notes--outside-request #'agent-shell-notes-edit)
   "C-c C-c" #'agent-shell-notes-send
   "w" (agent-shell-notes--outside-request #'agent-shell-notes-copy)
@@ -1393,6 +1394,44 @@ The buffer is drawn from the note list; its text is read-only.
 (put 'agent-shell-notes-edit-mode :advertised-binding (kbd "C-c C-e"))
 (put 'agent-shell-notes-edit-commit :advertised-binding (kbd "C-c C-c"))
 
+(defcustom agent-shell-notes-show-archived nil
+  "Non-nil to show archived notes in the review.
+They go under an `# Archived' heading below the other notes.
+\\<agent-shell-notes-review-mode-map>\\[agent-shell-notes-toggle-archived] \
+in the review toggles this for the Emacs session."
+  :type 'boolean)
+
+(defun agent-shell-notes--live-notes ()
+  "Return the notes that are not archived."
+  (seq-remove (lambda (note) (alist-get :archived note))
+              agent-shell-notes--notes))
+
+(defun agent-shell-notes--archived-notes ()
+  "Return the archived notes."
+  (seq-filter (lambda (note) (alist-get :archived note))
+              agent-shell-notes--notes))
+
+(defun agent-shell-notes--review-sections ()
+  "Return the groups the review draws, as (LIVE-GROUPS ARCHIVED-GROUPS).
+ARCHIVED-GROUPS is nil unless `agent-shell-notes-show-archived'."
+  (list (and (agent-shell-notes--live-notes)
+             (agent-shell-notes--groups (agent-shell-notes--live-notes)))
+        (and agent-shell-notes-show-archived
+             (agent-shell-notes--archived-notes)
+             (agent-shell-notes--groups (agent-shell-notes--archived-notes)))))
+
+(defun agent-shell-notes--shown-notes ()
+  "Return the notes the review draws, in review order."
+  (apply #'append (apply #'append (agent-shell-notes--review-sections))))
+
+(defun agent-shell-notes-toggle-archived ()
+  "Show or hide the archived notes in the review, for this Emacs session."
+  (interactive)
+  (setq agent-shell-notes-show-archived (not agent-shell-notes-show-archived))
+  (agent-shell-notes--review-draw)
+  (message "%s archived notes"
+           (if agent-shell-notes-show-archived "Showing" "Hiding")))
+
 (defface agent-shell-notes-header-review
   '((t :inherit bold))
   "Face of the `Review' label in the review's header line.")
@@ -1409,24 +1448,26 @@ Return nil when N is 0."
 
 (defun agent-shell-notes--header-summary ()
   "Return the review's note counts, for the header line."
-  (let ((notes agent-shell-notes--notes))
-    (if (null notes)
+  (let ((live (agent-shell-notes--live-notes))
+        (sent (agent-shell-notes--count
+               (length (agent-shell-notes--archived-notes)) "sent" "sent")))
+    (if (null agent-shell-notes--notes)
         "No notes"
       (string-join
        (delq nil
-             (list (agent-shell-notes--count (length notes) "note")
-                   (agent-shell-notes--count
-                    (length (agent-shell-notes--groups)) "group")
+             (list (agent-shell-notes--count (length live) "note")
+                   (and live
+                        (agent-shell-notes--count
+                         (length (agent-shell-notes--groups live)) "group"))
                    (agent-shell-notes--count
                     (seq-count (lambda (note)
                                  (memq (alist-get :id note)
                                        agent-shell-notes--marks))
-                               notes)
+                               (agent-shell-notes--shown-notes))
                     "marked" "marked")
-                   (agent-shell-notes--count
-                    (seq-count (lambda (note) (alist-get :archived note))
-                               notes)
-                    "sent" "sent")))
+                   (and sent (if agent-shell-notes-show-archived
+                                 sent
+                               (concat sent " (hidden)")))))
        " · "))))
 
 (defun agent-shell-notes--header-line ()
@@ -1442,9 +1483,14 @@ Return nil when N is 0."
           "\\<agent-shell-notes-edit-mode-map>\
 \\[agent-shell-notes-edit-commit] save  \
 \\[agent-shell-notes-edit-revert] revert"
-        "\\<agent-shell-notes-review-mode-map>\
+        (concat
+         "\\<agent-shell-notes-review-mode-map>\
 \\[agent-shell-notes-send] send  \
-\\[agent-shell-notes-edit-mode] edit")))))
+\\[agent-shell-notes-edit-mode] edit"
+         (when (agent-shell-notes--archived-notes)
+           (if agent-shell-notes-show-archived
+               "  \\[agent-shell-notes-toggle-archived] hide sent"
+             "  \\[agent-shell-notes-toggle-archived] show sent"))))))))
 
 ;;;; Edit mode
 
@@ -1564,12 +1610,12 @@ An emptied text keeps the note, quote only."
                 (when-let* ((target (alist-get :archived note)))
                   (format "sent to %s" target))))))
 
-(defun agent-shell-notes--groups ()
-  "Return the notes as a list of groups, each a list of notes.
-Groups come in the order of their first note's capture; notes in a
-group by line."
+(defun agent-shell-notes--groups (&optional notes)
+  "Return NOTES as a list of groups, each a list of notes.
+NOTES defaults to every note.  Groups come in the order of their first
+note's capture; notes in a group by line."
   (let (keys table)
-    (dolist (note agent-shell-notes--notes)
+    (dolist (note (or notes agent-shell-notes--notes))
       (let* ((key (agent-shell-notes--group-key note))
              (cell (assoc key table)))
         (if cell
@@ -1673,6 +1719,19 @@ The newline before the body passes the body's properties on but not
   (setq agent-shell-notes--request-start (point-marker))
   (insert (propertize request 'agent-shell-notes-field 'request)))
 
+(defun agent-shell-notes--insert-groups (groups prefix)
+  "Insert the review GROUPS, each heading preceded by PREFIX."
+  (dolist (group groups)
+    (let ((first (car group)))
+      (insert (propertize (concat prefix
+                                  (agent-shell-notes--group-heading first))
+                          'agent-shell-notes-group
+                          (agent-shell-notes--group-key first))
+              "\n\n"))
+    (dolist (note group)
+      (agent-shell-notes--insert-note note)
+      (insert "\n"))))
+
 (defun agent-shell-notes--review-draw ()
   "Redraw the current review buffer from the note list.
 Point stays on the note it was on.  The request body is kept."
@@ -1683,15 +1742,16 @@ Point stays on the note it was on.  The request body is kept."
     (remove-overlays)
     (erase-buffer)
     (setq agent-shell-notes--edit-slots nil)
-    (dolist (group (agent-shell-notes--groups))
-      (let ((first (car group)))
-        (insert (propertize (agent-shell-notes--group-heading first)
-                            'agent-shell-notes-group
-                            (agent-shell-notes--group-key first))
-                "\n\n"))
-      (dolist (note group)
-        (agent-shell-notes--insert-note note)
-        (insert "\n")))
+    (pcase-let ((`(,live ,archived) (agent-shell-notes--review-sections)))
+      (agent-shell-notes--insert-groups live "")
+      (when archived
+        (insert "# Archived\n\n")
+        (agent-shell-notes--insert-groups archived "#"))
+      (let ((hidden (and (not live) (not agent-shell-notes-show-archived)
+                         (length (agent-shell-notes--archived-notes)))))
+        (when (and hidden (> hidden 0))
+          (insert (format "%d sent note%s hidden\n\n"
+                          hidden (if (= hidden 1) "" "s"))))))
     ;; Front-sticky, so no insertion slips in before a read-only
     ;; character: font-lock makes some characters rear-nonsticky, such
     ;; as a link or URL in a `> ' quote.
@@ -2239,9 +2299,9 @@ what `agent-shell-notes-restore-last' needs to undo this."
 
 (defun agent-shell-notes--selected-notes ()
   "Return the marked notes in review order, else the note at point.
-Marks of deleted notes are ignored.  Signal `user-error' when there is
-nothing to send."
-  (let* ((notes (apply #'append (agent-shell-notes--groups)))
+Marks of deleted or hidden notes are ignored.  Signal `user-error'
+when there is nothing to send."
+  (let* ((notes (agent-shell-notes--shown-notes))
          (marked (seq-filter (lambda (note)
                                (memq (alist-get :id note)
                                      agent-shell-notes--marks))
@@ -2310,11 +2370,12 @@ Paths are relative, as there is no target.  Nothing else changes."
     (message "Copied %d notes" (length notes))))
 
 (defun agent-shell-notes-delete-marked ()
-  "Delete the marked notes, after confirmation."
+  "Delete the marked notes, after confirmation.
+Hidden notes are left alone, marked or not."
   (interactive)
   (let ((ids (seq-filter (lambda (id) (memq id agent-shell-notes--marks))
                          (mapcar (lambda (note) (alist-get :id note))
-                                 agent-shell-notes--notes))))
+                                 (agent-shell-notes--shown-notes)))))
     (unless ids
       (user-error "No marked notes"))
     (when (yes-or-no-p (format "Delete %d marked note%s? "
@@ -2324,7 +2385,8 @@ Paths are relative, as there is no target.  Nothing else changes."
                         agent-shell-notes--notes)
             agent-shell-notes--unfolded
             (seq-difference agent-shell-notes--unfolded ids)
-            agent-shell-notes--marks nil)
+            agent-shell-notes--marks
+            (seq-difference agent-shell-notes--marks ids))
       (agent-shell-notes--review-draw))))
 
 ;;;###autoload

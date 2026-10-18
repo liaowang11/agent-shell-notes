@@ -230,10 +230,16 @@ the cache is created on every call; hoist it
 ...
 
 # Claude Agent @ x — turn 3 — reply       <- group: session + turn + kind
-**reply**  `sent to Claude Agent @ y`       <- archived tag
+**reply**
 > I removed the retry loop because it was never reached.
 
 it is reached when the socket closes early
+
+# Archived                                 <- only with `a` (shown)
+
+## src/net.el — ~/proj/app                 <- archived group, `##`
+**line 40**  `sent to Claude Agent @ y`     <- archived tag
+...
 
 # Request
 
@@ -250,7 +256,13 @@ it is reached when the socket closes early
   sent.
 - The quote is folded after 6 lines (invisible overlay with `...`), `TAB`
   on a note toggles it.
-- Archived notes are dimmed (`agent-shell-notes-archived` face).
+- Archived notes are hidden by default (`agent-shell-notes-show-archived`,
+  nil); `a` toggles it for the Emacs session. Shown, they leave their
+  groups and go under `# Archived`, after the live notes and before
+  `# Request`, grouped the same way with `##` headings, dimmed
+  (`agent-shell-notes-archived` face). Hidden with no live note left, the
+  review says `N sent notes hidden`. Marks on hidden notes stay but are
+  ignored: send, copy, `D` and the marked count see shown notes only.
 - The package faces are overlays, not `face` text properties: font-lock
   from the Markdown parent repaints text properties (`**line 7**` turned
   `markdown-bold-face`). The location line gets
@@ -263,8 +275,10 @@ it is reached when the socket closes early
   The label is `Review` (`agent-shell-notes-header-review`, bold) or
   `Edit` (`agent-shell-notes-header-edit`, inherits `warning`); these faces
   are text properties, since font-lock never touches the header line.
-  Counts come from the note list: notes, groups, marked, sent (archived);
-  a zero count is left out, an empty review shows `No notes`. The hints
+  Counts come from the note list: notes and groups (not archived), marked
+  (shown notes), sent (archived, `(hidden)` while hidden); a zero count is
+  left out, an empty review shows `No notes`. With archived notes the
+  hints add `a show sent` or `a hide sent`. The hints
   are `substitute-command-keys` against the review or edit map, with
   `:advertised-binding` picking `C-c C-e` and `C-c C-c` among the commands'
   several keys. `header-line-format` is an `:eval` form, so marking, which
@@ -309,6 +323,7 @@ it is reached when the socket closes early
 | `k` | `-delete` | delete the note at point, no confirmation |
 | `D` | `-delete-marked` | delete marked notes, confirming |
 | `x` | `-purge-archived` | delete every archived note, no confirmation |
+| `a` | `-toggle-archived` | show or hide archived notes, for the session |
 | `e` | `-edit` | enter edit mode with point in this note's text |
 | `C-c C-e`, `C-x C-q` | `-edit-mode` | wdired-style edit mode (5.3) |
 | `RET`, `mouse-1` | `-jump` | on a location line or group heading: jump to the source (section 9) |
@@ -428,9 +443,10 @@ changes it for the session. Applied by `C-c C-c`, `C-u C-c C-c` and
 applies it.
 
 - `remove`: the sent notes leave the list.
-- `archive`: they stay in place, dimmed, `:archived` set to the target's
-  name (tag `sent to <session>`). An archived note can be marked and sent
-  again, which updates the tag. `t` skips them, `x` purges them.
+- `archive`: they stay on the list, `:archived` set to the target's name
+  (tag `sent to <session>`), and the review hides them until `a` shows
+  them under `# Archived` (5.1). A shown archived note can be marked and
+  sent again, which updates the tag. `t` skips them, `x` purges them.
 - `keep`: nothing changes on the notes.
 
 ### 7.2 Marks and request

@@ -39,6 +39,7 @@
          (agent-shell-notes--last-target nil)
          (agent-shell-notes--last-send nil)
          (agent-shell-notes-after-send agent-shell-notes-after-send)
+         (agent-shell-notes-show-archived nil)
          (agent-shell-notes-tests--shells nil)
          (kill-ring nil))
      (unwind-protect
@@ -614,6 +615,7 @@ Note I is on line I, so the review order is 1 .. N."
 
 (ert-deftest agent-shell-notes-review-t-skips-archived-notes ()
   (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
     (agent-shell-notes-tests--review-with 3)
     (setf (alist-get :archived (nth 1 agent-shell-notes--notes))
           "Claude Agent @ x")
@@ -957,7 +959,8 @@ With KEEP-PROPERTIES, keep the text properties."
         (setf (alist-get :archived (nth 2 agent-shell-notes--notes))
               "Claude Agent @ x")
         (agent-shell-notes-tests--key "g")
-        (should (equal "Review │ 3 notes · 2 groups · 1 sent │ C-c C-c send  C-c C-e edit"
+        (should (equal "Review │ 2 notes · 1 group · 1 sent (hidden) │ \
+C-c C-c send  C-c C-e edit  a show sent"
                        (agent-shell-notes-tests--header)))))))
 
 (ert-deftest agent-shell-notes-header-line-follows-marks-without-redraw ()
@@ -1544,6 +1547,7 @@ The boundary must be stubbed by the caller."
 
 (ert-deftest agent-shell-notes-after-send-archive-tags-and-dims ()
   (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
     (let* ((src (agent-shell-notes-tests--review-with 3))
            (dir (buffer-local-value 'default-directory src))
            (x (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
@@ -1557,7 +1561,8 @@ The boundary must be stubbed by the caller."
           (lambda (_) target) #'ignore
         (agent-shell-notes-tests--send-marked x '(1 3) "go")
         (should (equal '(1 2 3) (agent-shell-notes-tests--ids)))
-        (should (equal '(1 2 3) (agent-shell-notes-tests--runs
+        ;; Archived notes move below the live ones.
+        (should (equal '(2 1 3) (agent-shell-notes-tests--runs
                                  'agent-shell-notes-id)))
         (should (equal "Claude Agent @ x" (agent-shell-notes-tests--archived 1)))
         (should-not (agent-shell-notes-tests--archived 2))
@@ -1595,6 +1600,7 @@ The boundary must be stubbed by the caller."
 
 (ert-deftest agent-shell-notes-x-purges-archived-without-asking ()
   (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
     (let* ((src (agent-shell-notes-tests--review-with 3))
            (dir (buffer-local-value 'default-directory src))
            (shell (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
@@ -1619,6 +1625,112 @@ The boundary must be stubbed by the caller."
       (agent-shell-notes-tests--goto-note 2)
       (agent-shell-notes-tests--key "x")
       (should (equal '(2) (agent-shell-notes-tests--ids))))))
+
+;; Archive note ID by hand, as a send to SESSION would.
+(defun agent-shell-notes-tests--archive (id &optional session)
+  (setf (alist-get :archived (seq-find (lambda (note)
+                                         (eql id (alist-get :id note)))
+                                       agent-shell-notes--notes))
+        (or session "Claude Agent @ x")))
+
+(defun agent-shell-notes-tests--line-at (id)
+  "Return the text of the line before review note ID."
+  (save-excursion
+    (agent-shell-notes-tests--goto-note id)
+    (forward-line -2)
+    (buffer-substring-no-properties (line-beginning-position)
+                                    (line-end-position))))
+
+(ert-deftest agent-shell-notes-review-hides-archived-notes-by-default ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 3)
+    (agent-shell-notes-tests--archive 2)
+    (agent-shell-notes-tests--key "g")
+    (should (equal '(1 3) (agent-shell-notes-tests--runs
+                           'agent-shell-notes-id)))
+    (should-not (string-match-p "^# Archived" (buffer-string)))
+    (should (equal "Review │ 2 notes · 1 group · 1 sent (hidden) │ \
+C-c C-c send  C-c C-e edit  a show sent"
+                   (agent-shell-notes-tests--header)))))
+
+(ert-deftest agent-shell-notes-review-a-shows-archived-in-own-section ()
+  (agent-shell-notes-tests--with-clean-state
+    (let ((a (agent-shell-notes-tests--file
+              (agent-shell-notes-tests--lines 5) "a.el"))
+          (b (agent-shell-notes-tests--file
+              (agent-shell-notes-tests--lines 5) "b.el")))
+      (agent-shell-notes-tests--capture a 1 nil "one")    ; id 1
+      (agent-shell-notes-tests--capture b 2 nil "two")    ; id 2
+      (agent-shell-notes-tests--capture a 3 nil "three")  ; id 3
+      (agent-shell-notes-review)
+      (set-buffer "*agent-shell-notes*")
+      (agent-shell-notes-tests--archive 1)
+      (agent-shell-notes-tests--archive 2)
+      (agent-shell-notes-tests--key "g")
+      (should (equal '(3) (agent-shell-notes-tests--runs
+                           'agent-shell-notes-id)))
+      (agent-shell-notes-tests--key "a")
+      (should agent-shell-notes-show-archived)
+      ;; Live groups first, then the archived ones under their own heading.
+      (should (equal '(3 1 2) (agent-shell-notes-tests--runs
+                               'agent-shell-notes-id)))
+      (let ((text (buffer-string)))
+        (should (string-match "^# a\\.el — .*\n\n\\*\\*line 3" text))
+        (should (< (string-match "\\*\\*line 3" text)
+                   (string-match "^# Archived$" text)
+                   (string-match "^## a\\.el — " text)
+                   (string-match "^## b\\.el — " text)
+                   (string-match "^# Request$" text))))
+      (should (string-prefix-p "## a.el — " (agent-shell-notes-tests--line-at 1)))
+      (should (memq 'agent-shell-notes-archived
+                    (agent-shell-notes-tests--overlay-faces 1)))
+      (should (equal "**line 1** `sent to Claude Agent @ x`"
+                     (agent-shell-notes-tests--field-text 1 'location)))
+      (should (equal "Review │ 1 note · 1 group · 2 sent │ \
+C-c C-c send  C-c C-e edit  a hide sent"
+                     (agent-shell-notes-tests--header)))
+      ;; RET on a sub-heading jumps to its first note's source.
+      (agent-shell-notes-tests--goto-note 2)
+      (forward-line -2)
+      (should (eql 2 (alist-get :id (agent-shell-notes--jump-target))))
+      (agent-shell-notes-tests--key "a")
+      (should-not agent-shell-notes-show-archived)
+      (should (equal '(3) (agent-shell-notes-tests--runs
+                           'agent-shell-notes-id))))))
+
+(ert-deftest agent-shell-notes-review-says-when-all-notes-are-hidden ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 2)
+    (agent-shell-notes-tests--archive 1)
+    (agent-shell-notes-tests--archive 2)
+    (agent-shell-notes-tests--key "g")
+    (should-not (agent-shell-notes-tests--runs 'agent-shell-notes-id))
+    (should (string-prefix-p "2 sent notes hidden" (buffer-string)))
+    (should (equal "Review │ 2 sent (hidden) │ \
+C-c C-c send  C-c C-e edit  a show sent"
+                   (agent-shell-notes-tests--header)))))
+
+(ert-deftest agent-shell-notes-review-ignores-marks-on-hidden-notes ()
+  (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
+    (agent-shell-notes-tests--review-with 3)
+    (agent-shell-notes-tests--archive 2)
+    (agent-shell-notes-tests--key "g")
+    (agent-shell-notes-tests--goto-note 1)
+    (agent-shell-notes-tests--key "m")
+    (agent-shell-notes-tests--goto-note 2)
+    (agent-shell-notes-tests--key "m")
+    (agent-shell-notes-tests--key "a")
+    (agent-shell-notes-tests--goto-note 1)
+    (should (string-match-p "· 1 marked ·" (agent-shell-notes-tests--header)))
+    (should (equal '(1) (mapcar (lambda (note) (alist-get :id note))
+                                (agent-shell-notes--selected-notes))))
+    (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+      (agent-shell-notes-tests--key "D"))
+    (should (equal '(2 3) (agent-shell-notes-tests--ids)))
+    ;; The hidden note's mark comes back with it.
+    (agent-shell-notes-tests--key "a")
+    (should (equal '(2) (agent-shell-notes-tests--marked)))))
 
 (defun agent-shell-notes-tests--sorted-marks ()
   (sort (copy-sequence agent-shell-notes--marks) #'<))
@@ -1648,6 +1760,7 @@ The boundary must be stubbed by the caller."
 
 (ert-deftest agent-shell-notes-restore-last-after-archive ()
   (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
     (let* ((src (agent-shell-notes-tests--review-with 3))
            (dir (buffer-local-value 'default-directory src))
            (x (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
@@ -2097,6 +2210,7 @@ property's."
   ;; §5.1: font-lock from the Markdown parent repaints `**...**' and
   ;; backquoted text; the package faces must still win.
   (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
     (setq agent-shell-notes--notes
           (list (agent-shell-notes-tests--magit-note
                  1 "/proj/a/" "src/foo.el" :side 'old :start 7 :end 7
@@ -3038,6 +3152,7 @@ The header and the turn position read a shell-maker shell."
 
 (ert-deftest agent-shell-notes-compose-applies-after-send-and-restore ()
   (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes-show-archived t)
     (let* ((src (agent-shell-notes-tests--review-with 2))
            (dir (buffer-local-value 'default-directory src))
            (shell (agent-shell-notes-tests--shell "Claude Agent @ r" dir "s1"))

@@ -35,7 +35,9 @@ Grilled with Bill, 2026-10-11.
   whatever the disposition. It does not wait for `:on-delivered`, which never
   fires for a queued prompt. agent-shell's queue edit is how Bill gets a
   queued review back.
-- **Archived note**: stays in place in its group, dimmed, tagged
+- **Archived note** (superseded 2026-10-18 by
+  [Hide archived notes, show them in their own section](../../work/agent-shell-notes/issues/23-hide-archived-notes.md):
+  hidden by default, shown under `# Archived`): stays in place in its group, dimmed, tagged
   `sent to <session>` with the latest target. It can be marked and sent
   again, which updates the tag. `t` skips archived notes. `x` deletes every
   archived note without asking.

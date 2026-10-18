@@ -30,8 +30,8 @@ or placing that prompt in the session's compose buffer for a final edit.
 _Avoid_: Submit, flush
 
 **Archived note**:
-A note kept in the review after it was sent, marked with the target session
-it last went to.
+A note kept after it was sent, marked with the target session it last went
+to. The review hides it unless asked to show it.
 _Avoid_: Sent note, done
 
 **Mark**:
