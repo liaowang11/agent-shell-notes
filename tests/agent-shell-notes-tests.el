@@ -998,17 +998,65 @@ C-c C-c send  C-c C-e edit  a show sent"
 
 ;;;; The request
 
+(ert-deftest agent-shell-notes-review-empty-request-evil-insert-and-append ()
+  (skip-unless (require 'evil nil t))
+  (let ((was-on (bound-and-true-p evil-mode)))
+    (unwind-protect
+        (progn
+          (evil-mode 1)
+          (dolist (command '(evil-insert evil-append))
+            (agent-shell-notes-tests--with-clean-state
+              (agent-shell-notes-tests--review-with 1)
+              (goto-char (1- (point-max)))
+              (evil-normal-state)
+              (agent-shell-notes-tests--fontify)
+              (call-interactively command)
+              (agent-shell-notes-tests--type "fix this")
+              (should (equal "fix this" (agent-shell-notes--request-text)))
+              (agent-shell-notes-tests--fontify)
+              (agent-shell-notes-tests--type " now")
+              (should (equal "fix this now" (agent-shell-notes--request-text))))))
+      (unless was-on
+        (evil-mode -1)))))
+
+(ert-deftest agent-shell-notes-review-transcript-reply-is-not-a-blockquote ()
+  (agent-shell-notes-tests--with-clean-state
+    (setq agent-shell-notes--notes
+          (list (agent-shell-notes-tests--transcript-note
+                 1 "s1" "sidebar" "Explain the sidebar.")))
+    (agent-shell-notes-review)
+    (with-current-buffer "*agent-shell-notes*"
+      (agent-shell-notes-tests--fontify)
+      (let ((quote-face (ensure-list (get-text-property
+                                     (agent-shell-notes-tests--search "sidebar") 'face)))
+            (reply-face (ensure-list (get-text-property
+                                     (agent-shell-notes-tests--search "Explain") 'face))))
+        (should (seq-intersection quote-face
+                                  '(markdown-blockquote-face markdown-ts-block-quote)))
+        (should-not (seq-intersection reply-face
+                                      '(markdown-blockquote-face markdown-ts-block-quote)))))))
+
+(ert-deftest agent-shell-notes-review-request-preserves-trailing-newlines ()
+  (agent-shell-notes-tests--with-clean-state
+    (agent-shell-notes-tests--review-with 1)
+    (dolist (request '("" "fix it" "first\nsecond\n\n"))
+      (agent-shell-notes--set-request request)
+      (should (equal request (agent-shell-notes--request-text)))
+      (dotimes (_ 2)
+        (agent-shell-notes--review-draw)
+        (should (equal request (agent-shell-notes--request-text)))))))
+
 (defun agent-shell-notes-tests--request-start ()
   "Return the start of the request body in the review."
   (save-excursion
     (goto-char (point-min))
-    (re-search-forward "^# Request\n\n")
+    (re-search-forward "^# Request\n")
     (point)))
 
 (defun agent-shell-notes-tests--request ()
   "Return the request body of the review, without properties."
   (buffer-substring-no-properties (agent-shell-notes-tests--request-start)
-                                  (point-max)))
+                                  (1- (point-max))))
 
 (ert-deftest agent-shell-notes-review-note-commands-refuse-request-body ()
   ;; §5.1: note commands from the request body `user-error'.  Letters
@@ -1151,7 +1199,7 @@ C-c C-c send  C-c C-e edit  a show sent"
       (agent-shell-notes-tests--key "C-x C-q")
       (should (equal "fix it" (agent-shell-notes-tests--request)))
       ;; Still writable in edit mode.
-      (should (agent-shell-notes-tests--writable-p (point-max)))
+      (should (agent-shell-notes-tests--writable-p (1- (point-max))))
       (agent-shell-notes-tests--edit-key "C-c C-k")
       (should (equal "fix it" (agent-shell-notes-tests--request)))
       (goto-char (point-max))
@@ -1369,7 +1417,7 @@ IDS-AND-REQUEST is the request."
         (agent-shell-notes-tests--key "m")
         (agent-shell-notes-tests--goto-note 1)
         (agent-shell-notes-tests--key "m")
-        (goto-char (point-max))
+        (goto-char (1- (point-max)))
         (agent-shell-notes-tests--type "fix both")
         ;; C-c C-c from the request body sends too.
         (agent-shell-notes-tests--edit-key "C-c C-c")
@@ -1441,7 +1489,7 @@ IDS-AND-REQUEST is the request."
            (live (agent-shell-notes-tests--shell "Live" dir "s1")))
       (agent-shell-notes-tests--goto-note 1)
       (agent-shell-notes-tests--key "m")
-      (goto-char (point-max))
+      (goto-char (1- (point-max)))
       (agent-shell-notes-tests--type "go")
       (let ((before (agent-shell-notes-tests--review-state)))
         ;; No live shell: refused before the picker.
@@ -1471,7 +1519,7 @@ IDS-AND-REQUEST is the request."
       (agent-shell-notes-tests--goto-note 2)
       (agent-shell-notes-tests--key "m")
       (agent-shell-notes-tests--key "m")
-      (goto-char (point-max))
+      (goto-char (1- (point-max)))
       (agent-shell-notes-tests--type "go")
       (let ((before (agent-shell-notes-tests--review-state)))
         (agent-shell-notes-tests--with-boundary nil #'car #'ignore
@@ -1515,7 +1563,7 @@ The boundary must be stubbed by the caller."
     (agent-shell-notes-tests--goto-note id)
     (agent-shell-notes-tests--key "m"))
   (when request
-    (goto-char (point-max))
+    (goto-char (1- (point-max)))
     (agent-shell-notes-tests--type request))
   (agent-shell-notes-tests--goto-note (car ids))
   (agent-shell-notes-tests--key "C-c C-c")
@@ -1811,7 +1859,7 @@ C-c C-c send  C-c C-e edit  a show sent"
         (agent-shell-notes-tests--send-marked shell '(1) "one"))
       (agent-shell-notes-tests--goto-note 2)
       (agent-shell-notes-tests--key "m")
-      (goto-char (point-max))
+      (goto-char (1- (point-max)))
       (agent-shell-notes-tests--type "two")
       (let ((before (agent-shell-notes-tests--review-state)))
         (agent-shell-notes-tests--with-boundary (list shell) #'car
@@ -2278,7 +2326,7 @@ property's."
       (should (equal "now " (agent-shell-notes-tests--type-fontified
                              start "now ")))
       (should (equal "!" (agent-shell-notes-tests--type-fontified
-                          (point-max) "!")))
+                          (1- (point-max)) "!")))
       (should (equal "now fix!" (agent-shell-notes-tests--request)))
       ;; The heading, the location and the quote stay read-only.
       (should-not (agent-shell-notes-tests--writable-p (1- start)))
@@ -3105,7 +3153,7 @@ The header and the turn position read a shell-maker shell."
         (agent-shell-notes-tests--with-viewport
           (agent-shell-notes-tests--goto-note 1)
           (agent-shell-notes-tests--key "m")
-          (goto-char (point-max))
+          (goto-char (1- (point-max)))
           (agent-shell-notes-tests--type "go")
           ;; From the request body, as `C-c C-c' sends from there.
           (let ((current-prefix-arg '(4)))
@@ -3132,7 +3180,7 @@ The header and the turn position read a shell-maker shell."
       (should-not (plist-member agent-shell-notes-client :compose))
       (agent-shell-notes-tests--goto-note 1)
       (agent-shell-notes-tests--key "m")
-      (goto-char (point-max))
+      (goto-char (1- (point-max)))
       (agent-shell-notes-tests--type "go")
       (agent-shell-notes-tests--goto-note 2)
       (let ((before (agent-shell-notes-tests--review-state)))
@@ -3162,7 +3210,7 @@ The header and the turn position read a shell-maker shell."
         (agent-shell-notes-tests--with-viewport
           (agent-shell-notes-tests--goto-note 1)
           (agent-shell-notes-tests--key "m")
-          (goto-char (point-max))
+          (goto-char (1- (point-max)))
           (agent-shell-notes-tests--type "go")
           (agent-shell-notes-tests--goto-note 1)
           (agent-shell-notes-tests--compose)
@@ -3196,7 +3244,7 @@ The header and the turn position read a shell-maker shell."
       (agent-shell-notes-tests--with-boundary (list shell) #'car #'ignore
         (agent-shell-notes-tests--goto-note 2)
         (agent-shell-notes-tests--key "m")
-        (goto-char (point-max))
+        (goto-char (1- (point-max)))
         (agent-shell-notes-tests--type "all of it")
         (agent-shell-notes-tests--send-all)
         (should (equal (list (list shell
@@ -3243,7 +3291,7 @@ The header and the turn position read a shell-maker shell."
     (let* ((src (agent-shell-notes-tests--review-with 2))
            (dir (buffer-local-value 'default-directory src))
            (shell (agent-shell-notes-tests--shell "Claude Agent @ r" dir "s1")))
-      (goto-char (point-max))
+      (goto-char (1- (point-max)))
       (agent-shell-notes-tests--type "go")
       (let ((before (agent-shell-notes-tests--review-state)))
         ;; No live shell: the same error as `C-c C-c'.
@@ -3302,7 +3350,7 @@ The header and the turn position read a shell-maker shell."
                                       :append "my draft" :shell-buffer shell
                                       :edit t :disposition 'queue))))
             (set-buffer review)
-            (goto-char (point-max))
+            (goto-char (1- (point-max)))
             (agent-shell-notes-tests--type "go")
             (set-buffer src)
             (agent-shell-notes-tests--send-all t)

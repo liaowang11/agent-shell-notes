@@ -191,9 +191,11 @@ notes, groups, marked and sent notes there are, and the main keys:
 Review │ 3 notes · 2 groups · 1 marked │ C-c C-c send  C-c C-e edit
 ```
 
-The `# Request` section at the end takes ordinary typing; its
-text follows the notes in the next send. Elsewhere the buffer is read-only
-and single keys act on notes:
+The `# Request` section at the end takes ordinary typing, including Evil's
+`i` or `a` on its empty line; its text follows the notes in the next send.
+Transcript quotes are separated from your replies by a blank line so the
+replies are not rendered as part of the quote. Elsewhere the buffer is
+read-only and single keys act on notes:
 
 | Key | Command | Effect |
 | --- | --- | --- |
