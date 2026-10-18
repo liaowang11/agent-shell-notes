@@ -274,8 +274,15 @@ it is reached when the socket closes early
 - Marks: `agent-shell-notes-mark-indicator` picks `fringe` (default; a
   margin `*` on a tty) or `background` (a face overlay on the whole note).
   Marks are overlays, never text.
+- Transcript quotes end with a blank line before the note text, so
+  Markdown does not parse the user's reply as a continuation of the quote.
 - `# Request` is the last section. Its body is always editable (no edit
-  mode needed; see the mechanism above). Empty means notes only.
+  mode needed; see the mechanism above). Empty means notes only. The body
+  starts immediately after the heading's newline, on the visible blank
+  line, so Evil's `i` and `a` can type into an empty request. A protected
+  final newline accepts insertion before it but cannot be removed. It is
+  structural: extraction and replacement exclude it, preserving the
+  user's own trailing newlines through redraw, send and restore.
 - Writable regions (the request body, the popup's note area, edit-mode
   note texts) open after read-only text through the character before
   them, which must not pass `read-only` on. Its text property is
@@ -290,8 +297,8 @@ it is reached when the socket closes early
   URLs, markdown-ts-mode gives link buttons the `default-button` category,
   which carries it. Neither font-lock manages `front-sticky`. An
   edit-mode note text loses it along with `read-only`, so typed text never
-  carries it, and so does the newline that ends the text: that newline is
-  the one read-only character left not front-sticky, so the text takes
+  carries it. The read-only newlines that end edit-mode text slots and
+  the request body are also not front-sticky, so each region takes
   typing at its end.
 - Every note's extent is recorded as text properties
   (`agent-shell-notes-id` on the whole note, `agent-shell-notes-field` on

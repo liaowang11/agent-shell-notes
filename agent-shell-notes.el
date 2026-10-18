@@ -1612,6 +1612,10 @@ group by line."
     (insert "\n")
     (agent-shell-notes--insert-quote
      note (memq id agent-shell-notes--unfolded))
+    ;; A plain line can lazily continue a Markdown blockquote.
+    (when (and (eq (alist-get :source note) 'transcript)
+               (alist-get :quote note))
+      (insert "\n"))
     (cond
      (agent-shell-notes-edit-mode
       (let ((tbeg (point)))
@@ -1632,7 +1636,7 @@ group by line."
 
 (defvar-local agent-shell-notes--request-start nil
   "Marker at the start of the request body in the review.
-The body runs from here to the end of the buffer.")
+The body ends before the buffer's protected final newline.")
 
 (defun agent-shell-notes-in-request-p ()
   "Return non-nil when point is in the request body of the review.
@@ -1660,18 +1664,18 @@ Note commands call this first: the body holds no note."
             (start (buffer-local-value 'agent-shell-notes--request-start
                                        buffer)))
       (with-current-buffer buffer
-        (buffer-substring-no-properties start (point-max)))
+        (buffer-substring-no-properties start (1- (point-max))))
     ""))
 
 (defun agent-shell-notes--insert-request (request)
-  "Insert the read-only request heading, then the writable REQUEST body.
-The newline before the body passes the body's properties on but not
-`read-only', so text typed into an empty body is writable."
-  (insert (propertize "# Request\n\n" 'read-only t 'front-sticky '(read-only)))
-  (put-text-property (1- (point)) (point) 'agent-shell-notes-field 'request)
+  "Insert the protected heading, writable REQUEST and a final newline.
+The final newline is structural, not part of REQUEST.  It refuses
+removal but accepts insertion before it, including in an empty body."
+  (insert (propertize "# Request\n" 'read-only t 'front-sticky '(read-only)))
   (agent-shell-notes--open-after (1- (point)))
   (setq agent-shell-notes--request-start (point-marker))
-  (insert (propertize request 'agent-shell-notes-field 'request)))
+  (insert (propertize request 'agent-shell-notes-field 'request))
+  (insert (propertize "\n" 'agent-shell-notes-field 'request 'read-only t)))
 
 (defun agent-shell-notes--review-draw ()
   "Redraw the current review buffer from the note list.
@@ -2183,7 +2187,7 @@ and the request clear after every send in every mode."
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (save-excursion
-          (delete-region start (point-max))
+          (delete-region start (1- (point-max)))
           (goto-char start)
           (insert-and-inherit text))))))
 
