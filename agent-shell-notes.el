@@ -1413,12 +1413,25 @@ in the review toggles this for the Emacs session."
 
 (defun agent-shell-notes--review-sections ()
   "Return the groups the review draws, as (LIVE-GROUPS ARCHIVED-GROUPS).
-ARCHIVED-GROUPS is nil unless `agent-shell-notes-show-archived'."
+ARCHIVED-GROUPS is nil unless `agent-shell-notes-show-archived'; the
+group with the latest send comes first."
   (list (and (agent-shell-notes--live-notes)
              (agent-shell-notes--groups (agent-shell-notes--live-notes)))
         (and agent-shell-notes-show-archived
              (agent-shell-notes--archived-notes)
-             (agent-shell-notes--groups (agent-shell-notes--archived-notes)))))
+             (sort (agent-shell-notes--groups
+                    (agent-shell-notes--archived-notes))
+                   (lambda (a b)
+                     (time-less-p (agent-shell-notes--last-sent b)
+                                  (agent-shell-notes--last-sent a)))))))
+
+(defun agent-shell-notes--last-sent (group)
+  "Return when the latest note of GROUP was sent, 0 when unknown."
+  (let ((latest 0))
+    (dolist (note group latest)
+      (when-let* ((sent (alist-get :sent note))
+                  ((time-less-p latest sent)))
+        (setq latest sent)))))
 
 (defun agent-shell-notes--shown-notes ()
   "Return the notes the review draws, in review order."
@@ -1608,7 +1621,18 @@ An emptied text keeps the note, quote only."
                   ('committed (format "commit %s" (plist-get loc :rev))))
                 (and (eq (plist-get loc :side) 'old) "before changes")
                 (when-let* ((target (alist-get :archived note)))
-                  (format "sent to %s" target))))))
+                  (if-let* ((sent (alist-get :sent note)))
+                      (format "sent to %s, %s" target
+                              (agent-shell-notes--sent-time sent))
+                    (format "sent to %s" target)))))))
+
+(defun agent-shell-notes--sent-time (time)
+  "Return TIME for an archived tag: the clock today, else with the date."
+  (format-time-string (if (equal (format-time-string "%F" time)
+                                 (format-time-string "%F"))
+                          "%H:%M"
+                        "%b %-d %H:%M")
+                      time))
 
 (defun agent-shell-notes--groups (&optional notes)
   "Return NOTES as a list of groups, each a list of notes.
@@ -1749,7 +1773,7 @@ Point stays on the note it was on.  The request body is kept."
     (pcase-let ((`(,live ,archived) (agent-shell-notes--review-sections)))
       (agent-shell-notes--insert-groups live "")
       (when archived
-        (insert "# Archived\n\n")
+        (insert "# Archived — newest first\n\n")
         (agent-shell-notes--insert-groups archived "#"))
       (let ((hidden (and (not live) (not agent-shell-notes-show-archived)
                          (length (agent-shell-notes--archived-notes)))))
@@ -2262,17 +2286,19 @@ and the request clear after every send in every mode."
   (setq agent-shell-notes-after-send mode)
   (message "After send: %s" mode))
 
-(defun agent-shell-notes--set-archived (note value)
-  "Set NOTE's `:archived' to VALUE, in place."
-  (if-let* ((cell (assq :archived note)))
-      (setcdr cell value)
-    (nconc note (list (cons :archived value)))))
+(defun agent-shell-notes--set-archived (note value &optional sent)
+  "Set NOTE's `:archived' to VALUE and `:sent' to SENT, in place."
+  (pcase-dolist (`(,key . ,new) `((:archived . ,value) (:sent . ,sent)))
+    (if-let* ((cell (assq key note)))
+        (setcdr cell new)
+      (nconc note (list (cons key new))))))
 
 (defvar agent-shell-notes--last-send nil
   "What `agent-shell-notes-restore-last' puts back, or nil.
 A plist: `:mode' the after-send mode applied, `:marks', `:request',
-and `:notes', a list of (NOTE INDEX ARCHIVED) with each sent note,
-its index in the note list and its `:archived' before the send.")
+and `:notes', a list of (NOTE INDEX ARCHIVED SENT) with each sent note,
+its index in the note list and its `:archived' and `:sent' before the
+send.")
 
 (defun agent-shell-notes--after-send (notes session)
   "Apply `agent-shell-notes-after-send' to NOTES, just sent to SESSION.
@@ -2286,7 +2312,8 @@ what `agent-shell-notes-restore-last' needs to undo this."
                                (list note
                                      (seq-position agent-shell-notes--notes
                                                    note #'eq)
-                                     (alist-get :archived note)))
+                                     (alist-get :archived note)
+                                     (alist-get :sent note)))
                              notes)))
   (pcase agent-shell-notes-after-send
     ('remove
@@ -2294,9 +2321,10 @@ what `agent-shell-notes-restore-last' needs to undo this."
            (seq-remove (lambda (note) (memq note notes))
                        agent-shell-notes--notes)))
     ('archive
-     (let ((name (funcall (plist-get agent-shell-notes-client :name) session)))
+     (let ((name (funcall (plist-get agent-shell-notes-client :name) session))
+           (now (current-time)))
        (dolist (note notes)
-         (agent-shell-notes--set-archived note name)))))
+         (agent-shell-notes--set-archived note name now)))))
   (setq agent-shell-notes--marks nil)
   (agent-shell-notes--set-request "")
   (agent-shell-notes--review-refresh))
@@ -2406,7 +2434,7 @@ tags back, and the marks and request return.  Nothing is unsent."
       ('remove
        (let ((entries (sort (copy-sequence (plist-get last :notes))
                             (lambda (a b) (< (nth 1 a) (nth 1 b))))))
-         (pcase-dolist (`(,note ,index ,_) entries)
+         (pcase-dolist (`(,note ,index . ,_) entries)
            (unless (memq note agent-shell-notes--notes)
              (let ((index (min index (length agent-shell-notes--notes))))
                (setq agent-shell-notes--notes
@@ -2414,8 +2442,8 @@ tags back, and the marks and request return.  Nothing is unsent."
                              (list note)
                              (seq-drop agent-shell-notes--notes index))))))))
       ('archive
-       (pcase-dolist (`(,note ,_ ,archived) (plist-get last :notes))
-         (agent-shell-notes--set-archived note archived))))
+       (pcase-dolist (`(,note ,_ ,archived ,sent) (plist-get last :notes))
+         (agent-shell-notes--set-archived note archived sent))))
     (setq agent-shell-notes--last-send nil
           agent-shell-notes--marks (plist-get last :marks))
     (agent-shell-notes--set-request (plist-get last :request))

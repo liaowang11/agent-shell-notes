@@ -1614,7 +1614,8 @@ The boundary must be stubbed by the caller."
                                  'agent-shell-notes-id)))
         (should (equal "Claude Agent @ x" (agent-shell-notes-tests--archived 1)))
         (should-not (agent-shell-notes-tests--archived 2))
-        (should (equal "**line 1** `sent to Claude Agent @ x`"
+        (should (equal (format "**line 1** `sent to Claude Agent @ x, %s`"
+                               (agent-shell-notes-tests--sent-at 1))
                        (agent-shell-notes-tests--field-text 1 'location)))
         (should (equal "**line 2**"
                        (agent-shell-notes-tests--field-text 2 'location)))
@@ -1628,7 +1629,8 @@ The boundary must be stubbed by the caller."
         (setq target y)
         (agent-shell-notes-tests--send-marked y '(1))
         (should (equal "Claude Agent @ y" (agent-shell-notes-tests--archived 1)))
-        (should (equal "**line 1** `sent to Claude Agent @ y`"
+        (should (equal (format "**line 1** `sent to Claude Agent @ y, %s`"
+                               (agent-shell-notes-tests--sent-at 1))
                        (agent-shell-notes-tests--field-text 1 'location)))
         (should (equal "Claude Agent @ x"
                        (agent-shell-notes-tests--archived 3)))))))
@@ -1674,12 +1676,20 @@ The boundary must be stubbed by the caller."
       (agent-shell-notes-tests--key "x")
       (should (equal '(2) (agent-shell-notes-tests--ids))))))
 
-;; Archive note ID by hand, as a send to SESSION would.
-(defun agent-shell-notes-tests--archive (id &optional session)
-  (setf (alist-get :archived (seq-find (lambda (note)
-                                         (eql id (alist-get :id note)))
-                                       agent-shell-notes--notes))
-        (or session "Claude Agent @ x")))
+;; Archive note ID by hand, as a send to SESSION at time SENT would.
+(defun agent-shell-notes-tests--archive (id &optional session sent)
+  (agent-shell-notes--set-archived
+   (seq-find (lambda (note) (eql id (alist-get :id note)))
+             agent-shell-notes--notes)
+   (or session "Claude Agent @ x") sent))
+
+(defun agent-shell-notes-tests--sent-at (id)
+  "Return the time part of note ID's sent tag, as the review shows it."
+  (let ((sent (alist-get :sent (seq-find (lambda (note)
+                                           (eql id (alist-get :id note)))
+                                         agent-shell-notes--notes))))
+    (should sent)
+    (format-time-string "%H:%M" sent)))
 
 (defun agent-shell-notes-tests--line-at (id)
   "Return the text of the line before review note ID."
@@ -1712,27 +1722,31 @@ C-c C-c send  C-c C-e edit  a show sent"
       (agent-shell-notes-tests--capture a 3 nil "three")  ; id 3
       (agent-shell-notes-review)
       (set-buffer "*agent-shell-notes*")
-      (agent-shell-notes-tests--archive 1)
-      (agent-shell-notes-tests--archive 2)
+      (agent-shell-notes-tests--archive
+       1 nil (encode-time '(0 30 9 17 10 2026 nil -1 nil)))
+      (agent-shell-notes-tests--archive
+       2 nil (encode-time '(0 52 11 18 10 2026 nil -1 nil)))
       (agent-shell-notes-tests--key "g")
       (should (equal '(3) (agent-shell-notes-tests--runs
                            'agent-shell-notes-id)))
       (agent-shell-notes-tests--key "a")
       (should agent-shell-notes-show-archived)
-      ;; Live groups first, then the archived ones under their own heading.
-      (should (equal '(3 1 2) (agent-shell-notes-tests--runs
+      ;; Live groups first, then the archived ones under their own heading,
+      ;; the group sent last first.
+      (should (equal '(3 2 1) (agent-shell-notes-tests--runs
                                'agent-shell-notes-id)))
       (let ((text (buffer-string)))
         (should (string-match "^# a\\.el — .*\n\n\\*\\*line 3" text))
         (should (< (string-match "\\*\\*line 3" text)
-                   (string-match "^# Archived$" text)
-                   (string-match "^## a\\.el — " text)
+                   (string-match "^# Archived — newest first$" text)
                    (string-match "^## b\\.el — " text)
+                   (string-match "^## a\\.el — " text)
                    (string-match "^# Request$" text))))
       (should (string-prefix-p "## a.el — " (agent-shell-notes-tests--line-at 1)))
       (should (memq 'agent-shell-notes-archived
                     (agent-shell-notes-tests--overlay-faces 1)))
-      (should (equal "**line 1** `sent to Claude Agent @ x`"
+      ;; Another day shows the date.
+      (should (equal "**line 1** `sent to Claude Agent @ x, Oct 17 09:30`"
                      (agent-shell-notes-tests--field-text 1 'location)))
       (should (equal "Review │ 1 note · 1 group · 2 sent │ \
 C-c C-c send  C-c C-e edit  a hide sent"
@@ -1814,22 +1828,31 @@ C-c C-c send  C-c C-e edit  a show sent"
            (x (agent-shell-notes-tests--shell "Claude Agent @ x" dir "s1"))
            (y (agent-shell-notes-tests--shell "Claude Agent @ y" dir "s2"))
            (target x)
+           first-sent
            (agent-shell-notes-after-send 'archive))
       (agent-shell-notes-tests--with-boundary (list x y)
           (lambda (_) target) #'ignore
         (agent-shell-notes-tests--send-marked x '(1))
+        (setq first-sent (alist-get :sent (car agent-shell-notes--notes)))
+        ;; The second send gets a later time.
+        (sleep-for 0.01)
         (setq target y)
         (agent-shell-notes-tests--send-marked y '(1 2) "again"))
       (should (equal "Claude Agent @ y" (agent-shell-notes-tests--archived 1)))
+      (should (time-less-p first-sent
+                           (alist-get :sent (car agent-shell-notes--notes))))
       ;; Restore is a global command too.
       (with-temp-buffer
         (agent-shell-notes-restore-last))
       (should (equal "Claude Agent @ x" (agent-shell-notes-tests--archived 1)))
       (should-not (agent-shell-notes-tests--archived 2))
+      (should (equal first-sent (alist-get :sent (car agent-shell-notes--notes))))
+      (should-not (alist-get :sent (nth 1 agent-shell-notes--notes)))
       (should (equal '(1 2 3) (agent-shell-notes-tests--ids)))
       (should (equal '(1 2) (agent-shell-notes-tests--sorted-marks)))
       (should (equal "again" (agent-shell-notes-tests--request)))
-      (should (equal "**line 1** `sent to Claude Agent @ x`"
+      (should (equal (format "**line 1** `sent to Claude Agent @ x, %s`"
+                             (agent-shell-notes-tests--sent-at 1))
                      (agent-shell-notes-tests--field-text 1 'location)))
       (should (equal "**line 2**"
                      (agent-shell-notes-tests--field-text 2 'location))))))
@@ -3220,7 +3243,8 @@ The header and the turn position read a shell-maker shell."
           (should-not agent-shell-notes--marks)
           (with-current-buffer review
             (should (equal "" (agent-shell-notes-tests--request)))
-            (should (equal "**line 1** `sent to Claude Agent @ r`"
+            (should (equal (format "**line 1** `sent to Claude Agent @ r, %s`"
+                                   (agent-shell-notes-tests--sent-at 1))
                            (agent-shell-notes-tests--field-text 1 'location))))
           ;; Restore from the compose buffer, as a global command.
           (agent-shell-notes-restore-last)

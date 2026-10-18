@@ -91,6 +91,7 @@ A note is an alist:
  (:text . "Bill's remark")    ; may be ""
  (:markers . (BUF BEG END))   ; for jumping only; BUF may be dead
  (:archived . nil)            ; nil, or the name of the last target session
+ (:sent . nil)                ; time of the last send under `archive'; absent until then
  (:created . <time>))
 ```
 
@@ -235,10 +236,10 @@ the cache is created on every call; hoist it
 
 it is reached when the socket closes early
 
-# Archived                                 <- only with `a` (shown)
+# Archived — newest first                  <- only with `a` (shown)
 
 ## src/net.el — ~/proj/app                 <- archived group, `##`
-**line 40**  `sent to Claude Agent @ y`     <- archived tag
+**line 40**  `sent to Claude Agent @ y, 11:52`  <- archived tag
 ...
 
 # Request
@@ -252,14 +253,16 @@ it is reached when the socket closes early
   group by line (or turn position) ascending. A new note lands in place,
   not at the end.
 - Tags: `staged` / `unstaged` / `commit <rev>`, `before changes` (old
-  side), `sent to <session>` (archived). The turn index is shown and never
+  side), `sent to <session>, <time>` (archived; `HH:MM` today, else
+  `Oct 17 09:30`). The turn index is shown and never
   sent.
 - The quote is folded after 6 lines (invisible overlay with `...`), `TAB`
   on a note toggles it.
 - Archived notes are hidden by default (`agent-shell-notes-show-archived`,
   nil); `a` toggles it for the Emacs session. Shown, they leave their
   groups and go under `# Archived`, after the live notes and before
-  `# Request`, grouped the same way with `##` headings, dimmed
+  `# Request`, grouped the same way with `##` headings, the group with
+  the latest send first (notes with no `:sent` last), dimmed
   (`agent-shell-notes-archived` face). Hidden with no live note left, the
   review says `N sent notes hidden`. Marks on hidden notes stay but are
   ignored: send, copy, `D` and the marked count see shown notes only.
@@ -465,7 +468,7 @@ compose; `w` leaves it.
 ### 7.3 Restore last
 
 The package keeps one level: the sent notes with their prior `:archived`
-values, their list positions, the marks and the request.
+and `:sent` values, their list positions, the marks and the request.
 `agent-shell-notes-restore-last` (`C-c C-r` in the review, also a global
 command) undoes the review-side effect: under `remove` the notes return to
 their positions, under `archive` their old tags come back; in every mode
